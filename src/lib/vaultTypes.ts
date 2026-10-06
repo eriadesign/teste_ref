@@ -12,7 +12,8 @@ import type { Board, Item, Settings } from "./types";
  *
  * Quem lê não supõe o nome do arquivo: segue o `image` de cada referência.
  * Este app grava pelo id; a página publicada grava pelo título e guarda ainda
- * `historico/` e `imagensGuardadas` (imagens que só versões antigas citam).
+ * `historico/`, `imagensGuardadas` (imagens que só versões antigas citam) e,
+ * em cada referência ainda sem imagem, `imagePendente` (o arquivo esperado).
  */
 
 export const VAULT_FILE = "acervo.json";

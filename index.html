@@ -143,6 +143,10 @@
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     color-scheme: light dark;
   }
+  /* O tema escolhido no app vale também pros controles nativos: barra de
+     rolagem, lista do <select> e seletor de cor. */
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
 
   * { box-sizing: border-box; }
 
@@ -180,7 +184,7 @@
 
   /* ── esqueleto ──────────────────────────────────────────────────── */
 
-  .app { display: flex; height: 100dvh; }
+  .app { display: flex; height: 100vh; height: 100dvh; }
 
   .rail {
     width: 17rem;
@@ -589,6 +593,10 @@
   .grade .title-btn { -webkit-line-clamp: 2; }
   /* área de clique do card inteiro, sem aninhar botão dentro de botão */
   .title-btn::before { content: ""; position: absolute; inset: 0; z-index: 1; }
+  /* O botão do título não mostra o anel (ele é cortado); quem mostra é o card. */
+  .card:has(.title-btn:focus-visible), .row:has(.title-btn:focus-visible) {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
 
   .card-excerpt {
     font-size: 12px; line-height: 1.55; color: var(--text-muted);
@@ -694,7 +702,8 @@
   .row time { flex: none; font-size: 11px; color: var(--text-faint); width: 5.5rem; text-align: right; }
   .row .tags { flex: none; }
   .row .card-actions { position: static; opacity: 0; }
-  .row:hover .card-actions { opacity: 1; }
+  .row:hover .card-actions, .row:focus-within .card-actions { opacity: 1; }
+  @media (max-width: 640px) { .only-wide { display: none; } }
 
   /* ── estados vazios ─────────────────────────────────────────────── */
   .empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 72px 24px; }
@@ -1224,18 +1233,61 @@
   function normalizeUrl(raw) {
     const trimmed = raw.trim();
     if (!trimmed) return null;
-    const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : "https://" + trimmed;
+    const explicit = /^https?:\/\//i.test(trimmed);
+    if (!explicit && !looksLikeDomain(trimmed)) return null;
+    const candidate = explicit ? trimmed : "https://" + trimmed;
     try {
       const url = new URL(candidate);
       return url.hostname.includes(".") ? url.toString() : null;
     } catch { return null; }
   }
 
+  /** Extensões de arquivo que parecem domínio: "index.html" e "Node.js" não são sites. */
+  const FILE_EXTENSIONS = new Set(["js", "ts", "tsx", "jsx", "md", "txt", "html", "htm", "css", "json",
+    "png", "jpg", "jpeg", "gif", "svg", "webp", "pdf", "py", "zip", "mp3", "mp4", "mov", "doc", "docx",
+    "xls", "xlsx", "ppt", "pptx", "csv", "fig", "sketch", "psd", "ai", "exe", "sh", "yml", "yaml"]);
+
+  /**
+   * Um endereço sem "https://" só conta como site se terminar num domínio de
+   * topo de letras ("stripe.com", "warren.com.br/gestao"). "3.14" e "v2.0"
+   * ficam de fora (o navegador leria "3.14" como o IP 3.0.0.14), e "Node.js"
+   * ou "index.html" também.
+   */
+  function looksLikeDomain(text) {
+    const match = /^([\w-]+(?:\.[\w-]+)+)([/?#].*)?$/.exec(String(text).trim());
+    if (!match) return false;
+    const labels = match[1].toLowerCase().split(".");
+    const tld = labels[labels.length - 1];
+    if (!/^[a-z]{2,24}$/.test(tld)) return false;
+    // "www.site.js" é site; "Node.js" sozinho, sem www nem caminho, é arquivo.
+    return !FILE_EXTENSIONS.has(tld) || labels[0] === "www" || Boolean(match[2]);
+  }
+
   function extractUrls(text) {
-    const found = text.match(/https?:\/\/[^\s<>"')]+/gi);
-    if (found && found.length) return found;
-    return text.split(/[\n,]/).map((l) => l.trim())
-      .filter((l) => /^[\w-]+(\.[\w-]+)+([/?#].*)?$/.test(l));
+    const found = text.match(/https?:\/\/[^\s<>"',]+/gi);
+    if (found && found.length) return found.map(trimUrlTail);
+    return text.split(/[\n,]/).map((l) => l.trim()).filter(looksLikeDomain);
+  }
+
+  /**
+   * Tira do fim do link a pontuação da frase em volta: "veja https://a.com."
+   * e "(https://a.com)". Parêntese só sai quando sobra sem par — o de
+   * "wiki/Mercury_(planet)" é do endereço.
+   */
+  function trimUrlTail(url) {
+    let out = url.replace(/[.,;:!?]+$/, "");
+    while (out.endsWith(")") && (out.match(/\(/g) || []).length < (out.match(/\)/g) || []).length) {
+      out = out.slice(0, -1).replace(/[.,;:!?]+$/, "");
+    }
+    return out;
+  }
+
+  /** O que sobra do texto colado depois de tirar os links; vazio se for só link. */
+  function textBesideUrls(text, urls) {
+    let rest = text;
+    for (const url of urls) rest = rest.split(url).join(" ");
+    rest = rest.replace(/\s+/g, " ").trim();
+    return /[\p{L}\p{N}]{2,}/u.test(rest) ? rest : "";
   }
 
   const RELATIVE = [
@@ -1249,7 +1301,9 @@
     if (Math.abs(delta) < 45000) return "agora";
     const fmt = new Intl.RelativeTimeFormat("pt-BR", { numeric: "auto" });
     for (const [limit, div, unit] of RELATIVE) {
-      if (Math.abs(delta) < limit) return fmt.format(Math.round(delta / div), unit);
+      // Arredonda antes de escolher a unidade: 59 min 40 s é "há 1 hora",
+      // não "há 60 minutos".
+      if (Math.abs(Math.round(delta / div)) < limit / div) return fmt.format(Math.round(delta / div), unit);
     }
     return "";
   }
@@ -1261,7 +1315,7 @@
     if (bytes < 1024) return bytes + " B";
     const units = ["KB", "MB", "GB"];
     let value = bytes / 1024, i = 0;
-    while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+    while (value >= 1023.5 && i < units.length - 1) { value /= 1024; i++; }
     return value.toFixed(value < 10 ? 1 : 0) + " " + units[i];
   }
 
@@ -1298,6 +1352,9 @@
     if (colors.length === 1 && !/^#?[0-9a-f]{6}$/i.test(tokens[0].replace(/^#/, ""))) {
       return null;
     }
+    // Palavras feitas só de letras de a a f ("decade", "add bad bed") não são
+    // cores: pelo menos um pedaço precisa ter "#" ou um número.
+    if (!tokens.some((token) => /[#0-9]/.test(token))) return null;
     return colors;
   }
 
@@ -1439,7 +1496,7 @@
 
     const direct = hay.indexOf(needle);
     if (direct !== -1) {
-      let score = 120 - direct;
+      let score = Math.max(1, 120 - direct);
       if (direct === 0) score += 60; else if (isBoundary(hay, direct)) score += 30;
       return score;
     }
@@ -1505,22 +1562,24 @@
     "fontshare.com": ["tipografia"], "coolors.co": ["cor"], "arxiv.org": ["pesquisa"],
   };
 
+  // Cada alternativa fica entre \b(?: … )\b: sem o grupo, "app" casava dentro
+  // de "whatsapp" e "ios" dentro de "comentários".
   const KEYWORD_TAGS = [
-    [/\b(landing\s?page|lp)\b/, "landing-page"], [/\bdesign\s?system\b/, "design-system"],
-    [/\bdashboard|painel\b/, "dashboard"], [/\bonboarding\b/, "onboarding"],
-    [/\bcheckout|carrinho\b/, "checkout"], [/\bpricing|preco|planos\b/, "pricing"],
-    [/\bemail|newsletter\b/, "email"], [/\bcopy(writing)?|headline\b/, "copy"],
-    [/\bbrand(ing)?|marca\b/, "branding"], [/\blogo\b/, "logo"],
-    [/\btipografia|typography|font(e|s)?\b/, "tipografia"], [/\bpalet(a|te)|cores?\b/, "cor"],
-    [/\bilustra(cao|tion)\b/, "ilustracao"], [/\banima(cao|tion)|motion\b/, "animacao"],
-    [/\b3d|blender\b/, "3d"], [/\bicone?s?|icon(s|set)?\b/, "icone"],
-    [/\bmobile|app|ios|android\b/, "mobile"], [/\bux\b/, "ux"], [/\bui\b/, "ui"],
-    [/\bacessibilidade|accessibility|a11y\b/, "acessibilidade"],
-    [/\btutorial|como fazer|how to\b/, "tutorial"], [/\bcase study|estudo de caso\b/, "case"],
-    [/\bportfolio\b/, "portfolio"], [/\bia\b|\bai\b/, "ia"], [/\bprompt\b/, "prompt"],
-    [/\bsaas\b/, "saas"], [/\bfintech|investimento|financ(as|eiro)\b/, "financas"],
-    [/\bmarketing|growth|funil\b/, "marketing"], [/\bvideo|reels?|short(s)?\b/, "video"],
-    [/\bapresenta(cao|tion)|slide(s)?|deck\b/, "apresentacao"],
+    [/\b(?:landing\s?page|lp)\b/, "landing-page"], [/\bdesign\s?system\b/, "design-system"],
+    [/\b(?:dashboard|painel)\b/, "dashboard"], [/\bonboarding\b/, "onboarding"],
+    [/\b(?:checkout|carrinho)\b/, "checkout"], [/\b(?:pricing|preco|planos)\b/, "pricing"],
+    [/\b(?:email|newsletter)\b/, "email"], [/\b(?:copy(?:writing)?|headline)\b/, "copy"],
+    [/\b(?:brand(?:ing)?|marca)\b/, "branding"], [/\blogo\b/, "logo"],
+    [/\b(?:tipografia|typography|font(?:e|s)?)\b/, "tipografia"], [/\b(?:palet(?:a|te)s?|cor(?:es)?)\b/, "cor"],
+    [/\bilustra(?:cao|tion)\b/, "ilustracao"], [/\b(?:anima(?:cao|tion)|motion)\b/, "animacao"],
+    [/\b(?:3d|blender)\b/, "3d"], [/\b(?:icones?|icons?|iconset)\b/, "icone"],
+    [/\b(?:mobile|app|ios|android)\b/, "mobile"], [/\bux\b/, "ux"], [/\bui\b/, "ui"],
+    [/\b(?:acessibilidade|accessibility|a11y)\b/, "acessibilidade"],
+    [/\b(?:tutorial|como fazer|how to)\b/, "tutorial"], [/\b(?:case study|estudo de caso)\b/, "case"],
+    [/\bportfolio\b/, "portfolio"], [/\bia\b/, "ia"], [/\bprompt\b/, "prompt"],
+    [/\bsaas\b/, "saas"], [/\b(?:fintech|investimento|financ(?:as|eiro))\b/, "financas"],
+    [/\b(?:marketing|growth|funil)\b/, "marketing"], [/\b(?:video|reels?|shorts?)\b/, "video"],
+    [/\b(?:apresenta(?:cao|tion)|slides?|deck)\b/, "apresentacao"],
   ];
 
   function suggestTags({ url, title, description }, limit = 5) {
@@ -1531,13 +1590,20 @@
         if (host === domain || host.endsWith("." + domain)) list.forEach((t) => tags.add(t));
       }
     }
-    const hay = deaccent([title, description].filter(Boolean).join(" "));
+    const raw = [title, description].filter(Boolean).join(" ");
+    const hay = deaccent(raw);
     for (const [pattern, tag] of KEYWORD_TAGS) {
       if (tags.size >= limit) break;
       if (pattern.test(hay)) tags.add(tag);
     }
+    // "AI" em inglês vira "ia" — mas só olhando o texto com acento, senão o
+    // "aí" de toda frase em português ("e aí", "por aí") virava "ia" também.
+    if (tags.size < limit && /(^|[^\p{L}])ai($|[^\p{L}])/u.test(raw.toLowerCase())) tags.add("ia");
     if (tags.size === 0 && host) {
-      const root = host.split(".").slice(-2)[0];
+      // "uol.com.br" dá "uol", não "com".
+      const parts = host.split(".");
+      let root = parts.length > 1 ? parts[parts.length - 2] : parts[0];
+      if (parts.length > 2 && /^(com|org|gov|net|edu|co|ac)$/.test(root)) root = parts[parts.length - 3];
       if (root) tags.add(slugifyTag(root));
     }
     return [...tags].slice(0, limit);
@@ -1579,25 +1645,31 @@
     return wrap(db.transaction(store, "readonly").objectStore(store).get(key));
   }
 
-  async function rawPut(store, value, key) {
-    const db = await openDB();
-    const os = db.transaction(store, "readwrite").objectStore(store);
-    return wrap(key === undefined ? os.put(value) : os.put(value, key));
-  }
-  async function rawPutMany(store, values) {
-    if (!values.length) return;
+  /**
+   * Uma escrita só vale quando a transação fecha. Disco cheio aparece como
+   * `abort` no commit, depois de o pedido já ter dado sucesso — esperar só o
+   * pedido diria "salvo" pra algo que não foi.
+   */
+  async function writeTx(store, run) {
     const db = await openDB();
     const tx = db.transaction(store, "readwrite");
-    values.forEach((v) => tx.objectStore(store).put(v));
-    return new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); });
+    run(tx.objectStore(store));
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error("A gravação no navegador foi cancelada"));
+    });
   }
-  async function rawDelete(store, key) {
-    const db = await openDB();
-    return wrap(db.transaction(store, "readwrite").objectStore(store).delete(key));
+
+  const rawPut = (store, value, key) =>
+    writeTx(store, (os) => (key === undefined ? os.put(value) : os.put(value, key)));
+  async function rawPutMany(store, values) {
+    if (!values.length) return;
+    return writeTx(store, (os) => values.forEach((v) => os.put(v)));
   }
+  const rawDelete = (store, key) => writeTx(store, (os) => os.delete(key));
   async function rawClear(store) {
-    const db = await openDB();
-    return wrap(db.transaction(store, "readwrite").objectStore(store).clear());
+    return writeTx(store, (os) => os.clear());
   }
 
   /**
@@ -1881,9 +1953,9 @@
    * referência (ou por algo que alguém pôs na pasta) nunca é reaproveitado:
    * sobrescrevê-lo seria trocar a imagem de outra pessoa.
    */
-  function assignImageNames(entries, onDisk, owner) {
+  function assignImageNames(entries, onDisk, owner, reserved = new Set()) {
     const names = new Map();
-    const used = new Set();
+    const used = new Set(reserved);
     const free = (name, id) => !used.has(lower(name))
       && (!onDisk.has(lower(name)) || owner.get(lower(name)) === id);
 
@@ -2029,11 +2101,17 @@
    * versões mais novas dela em outro lugar só por ter recuperado a capa.
    */
   async function attachImage(id, blob, { ratio } = {}) {
+    const before = state.items.find((item) => item.id === id);
+    if (!before) return null;
+    const data = await inMemory(blob);
+    const measured = ratio || (before.imageRatio ? undefined : await imageRatioOf(data));
+    // Relê depois das esperas: o acervo pode ter mudado enquanto a imagem era
+    // lida, e a posição antiga já pode ser de outra referência.
     const index = state.items.findIndex((item) => item.id === id);
     if (index === -1) return null;
     const { image, ...rest } = state.items[index];
-    const next = Object.assign({}, rest, { imageBlob: await inMemory(blob) });
-    if (!next.imageRatio) next.imageRatio = ratio || await imageRatioOf(blob);
+    const next = Object.assign({}, rest, { imageBlob: data });
+    if (!next.imageRatio && measured) next.imageRatio = measured;
     releaseCover(id);
     state.items[index] = next;
     await rawPut(S_ITEMS, next);
@@ -2069,35 +2147,39 @@
     for (const raw of snapshot.items) {
       if (!raw || !raw.id) continue;
       const current = itemMap.get(raw.id);
-      if (current && (current.updatedAt || 0) > (raw.updatedAt || 0)) continue;
-
-      const { image, imageData, ...rest } = raw;
-      const item = Object.assign({}, rest, {
-        tags: Array.isArray(rest.tags) ? rest.tags : [],
-        boardIds: Array.isArray(rest.boardIds) ? rest.boardIds : [],
-        favorite: Boolean(rest.favorite),
-      });
+      const { image, imagePendente, imageData, ...rest } = raw;
+      const path = image || imagePendente;
+      // Igual ou mais antiga que a daqui não entra — a não ser pra devolver
+      // a imagem que falta aqui.
+      const newer = !current || (current.updatedAt || 0) < (raw.updatedAt || 0);
+      const needsImage = Boolean(current && !current.imageBlob && (path || imageData));
+      if (!newer && !needsImage) continue;
 
       const blob = current && current.imageBlob ? current.imageBlob
         : imageData ? await (await fetch(imageData)).blob()
-        : image ? await vaultImageFor(raw) : null;
-      if (blob) item.imageBlob = blob;
-      else if (image) item.image = image;
+        : path ? await vaultImageFor(Object.assign({}, raw, { image: path })) : null;
 
-      releaseCover(item.id);
-      itemMap.set(item.id, item);
+      let item;
+      if (newer) {
+        item = normalizeImported(rest);
+        if (blob) item.imageBlob = blob;
+        else if (path) item.image = path;
+      } else {
+        if (!blob) continue;
+        const { image: _pendente, ...mine } = current;
+        item = Object.assign({}, mine, { imageBlob: blob });
+      }
       itemsIn.push(item);
     }
 
-    if (!itemsIn.length && !boardsIn.length) return 0;
-
-    state.items = [...itemMap.values()];
-    state.boards = [...boardMap.values()];
-    if (itemsIn.length) await dropSeedLeftovers(snapshot);
-    sortBoards();
+    // Lido o que havia pra ler, entra no acervo de agora — que pode ter mudado
+    // enquanto as imagens eram lidas.
+    const applied = mergeIntoState(itemsIn, boardsIn);
+    if (!applied.length && !boardsIn.length) return 0;
+    if (applied.length) await dropSeedLeftovers(snapshot);
 
     await rawPutMany(S_BOARDS, boardsIn);
-    await rawPutMany(S_ITEMS, itemsIn);
+    await rawPutMany(S_ITEMS, applied);
 
     if (settings && snapshot.settings) {
       state.view = snapshot.settings.view || state.view;
@@ -2106,7 +2188,43 @@
       applyTheme();
     }
 
-    return itemsIn.length;
+    return applied.length;
+  }
+
+  /**
+   * Uma referência vinda de arquivo, com os campos que o resto do app supõe
+   * que existem. Sem título, a ordenação por título e o painel quebravam.
+   */
+  function normalizeImported(rest) {
+    const fallback = rest.kind === "palette" ? "Paleta" : rest.kind === "image" ? UNNAMED_IMAGE
+      : rest.kind === "note" ? "Nota" : hostOf(rest.url) || "Sem título";
+    return Object.assign({}, rest, {
+      title: String(rest.title || "").trim() || fallback,
+      tags: Array.isArray(rest.tags) ? rest.tags : [],
+      boardIds: Array.isArray(rest.boardIds) ? rest.boardIds : [],
+      favorite: Boolean(rest.favorite),
+    });
+  }
+
+  /**
+   * Põe no acervo o que foi lido de um arquivo, relendo o estado de agora:
+   * enquanto as imagens eram lidas, alguém pode ter criado, editado ou
+   * apagado uma referência. Em cada id fica a versão editada por último.
+   * Devolve as referências que entraram de fato.
+   */
+  function mergeIntoState(items, boards) {
+    const itemMap = new Map(state.items.map((item) => [item.id, item]));
+    const applied = items.filter((item) => {
+      const current = itemMap.get(item.id);
+      return !current || (current.updatedAt || 0) <= (item.updatedAt || 0);
+    });
+    applied.forEach((item) => { releaseCover(item.id); itemMap.set(item.id, item); });
+    const boardMap = new Map(state.boards.map((board) => [board.id, board]));
+    boards.forEach((board) => boardMap.set(board.id, board));
+    state.items = [...itemMap.values()];
+    state.boards = [...boardMap.values()];
+    sortBoards();
+    return applied;
   }
 
   /**
@@ -2268,26 +2386,39 @@
     vaultTimer = setTimeout(() => { void writeVault(); }, delay);
   }
 
-  /** Grava agora, esperando a gravação em curso terminar em vez de pular. */
-  async function flushVault(options) {
+  /** Espera a gravação em curso terminar (até ~10 s). */
+  async function waitVaultIdle() {
     for (let i = 0; vaultWriting && i < 200; i++) await new Promise((resolve) => setTimeout(resolve, 50));
-    await writeVault(options);
+    return !vaultWriting;
   }
 
+  /** Grava agora, esperando a gravação em curso terminar em vez de pular. */
+  async function flushVault(options) {
+    if (!(await waitVaultIdle())) return false;
+    return writeVault(options);
+  }
+
+  /**
+   * Grava o acervo na pasta. Devolve `true` só quando acervo.json (e a cópia
+   * manual, se pedida) foram gravados de fato — quem depende disso, como
+   * "Limpar acervo", não segue em frente sem essa confirmação.
+   */
   async function writeVault({ checkpoint = false } = {}) {
-    if (!vaultOn() || vaultWriting) return;
+    if (!vaultOn() || vaultWriting) return false;
     clearTimeout(vaultTimer);
     vaultWriting = true;
     vaultDirty = false;
     setVaultStatus("saving");
+    // A pasta desta gravação. Se ela for trocada no meio, nada vai pro lugar errado.
+    const dir = vault.dir;
 
     try {
-      if (!(await ensureVaultAccess())) return;
+      if (!(await ensureVaultAccess())) return false;
 
       await rotateHistory();
       const kept = await loadKept();
 
-      const imagesDir = await vault.dir.getDirectoryHandle(VAULT_IMAGES, { create: true });
+      const imagesDir = await dir.getDirectoryHandle(VAULT_IMAGES, { create: true });
       const onDisk = new Map();
       for await (const entry of imagesDir.values()) {
         if (entry.kind === "file") onDisk.set(lower(entry.name), entry);
@@ -2341,7 +2472,11 @@
         const current = index.get(id);
         entries.push({ id, title: info.title, ext: extOf(current) || ".webp", current, createdAt: info.createdAt });
       }
-      const names = assignImageNames(entries, onDisk, owners);
+      // O nome que uma referência ainda sem imagem espera fica reservado pra
+      // ela: se o arquivo aparecer depois, ele é dela, não de outra.
+      const pendingNames = new Set(items.filter((item) => !item.imageBlob && item.image)
+        .map((item) => lower(baseName(item.image))));
+      const names = assignImageNames(entries, onDisk, owners, pendingNames);
 
       const renamed = new Set();
       for (const entry of entries) {
@@ -2357,23 +2492,13 @@
         if (entry.current && !same) renamed.add(lower(entry.current));
       }
 
-      // Sai da pasta só o que é do app e ninguém mais cita: arquivo com dono no
-      // índice, nome antigo de um renomeado ou nome de id. O que alguém pôs na
-      // pasta à mão fica onde está.
-      const keepNames = new Set([...names.values()].map(lower));
-      for (const [name, entry] of onDisk) {
-        if (keepNames.has(name)) continue;
-        const stem = stemOf(entry.name);
-        const ours = owners.has(name) || renamed.has(name) || UUID_RE.test(stem) || stem.startsWith("seed-");
-        if (ours) await imagesDir.removeEntry(entry.name).catch(() => {});
-      }
-
       const rows = [];
       for (const item of items) {
         const { imageBlob, image, ...rest } = item;
         if (imageBlob && names.has(item.id)) rows.push(Object.assign({}, rest, { image: VAULT_IMAGES + "/" + names.get(item.id) }));
-        // Imagem ainda não encontrada: o caminho fica anotado pra ela poder voltar.
-        else if (image) rows.push(Object.assign({}, rest, { image }));
+        // Imagem ainda não encontrada: o caminho fica anotado pra ela poder
+        // voltar — num campo à parte, pra ninguém ler como dona do arquivo.
+        else if (image) rows.push(Object.assign({}, rest, { imagePendente: image }));
         else rows.push(rest);
       }
       const guardadas = {};
@@ -2392,7 +2517,8 @@
       };
       // Imagens de referências apagadas que alguma versão guardada ainda cita.
       if (Object.keys(guardadas).length) snapshot.imagensGuardadas = guardadas;
-      await writeVaultFile(vault.dir, VAULT_FILE, JSON.stringify(snapshot, null, 2));
+      if (vault.dir !== dir) { vaultDirty = true; return false; }
+      await writeVaultFile(dir, VAULT_FILE, JSON.stringify(snapshot, null, 2));
       vault.index = new Map(names);
       document.querySelectorAll("[data-image-file]").forEach((node) => {
         const name = vault.index.get(node.dataset.imageFile);
@@ -2401,9 +2527,22 @@
 
       // A cópia manual: o mesmo conteúdo, num arquivo que nada automático encosta.
       if (checkpoint) {
-        await writeVaultFile(vault.dir, VAULT_RESCUE, JSON.stringify(snapshot, null, 2));
+        await writeVaultFile(dir, VAULT_RESCUE, JSON.stringify(snapshot, null, 2));
         vault.rescue = { items: rows.length, boards: state.boards.length, savedAt: stamp };
         vault.kept = null;
+      }
+
+      // Só depois de o acervo.json novo estar gravado sai da pasta o que é do
+      // app e ninguém mais cita: arquivo com dono no índice, nome antigo de um
+      // renomeado ou nome de id (o app gera ids em minúsculas). Assim um
+      // travamento no meio nunca deixa o acervo.json citando arquivo apagado.
+      // O que alguém pôs na pasta à mão fica onde está.
+      const keepNames = new Set([...names.values(), ...pendingNames].map(lower));
+      for (const [name, entry] of onDisk) {
+        if (keepNames.has(name)) continue;
+        const stem = stemOf(entry.name);
+        const idName = (UUID_RE.test(stem) && stem === stem.toLowerCase()) || stem.startsWith("seed-");
+        if (owners.has(name) || renamed.has(name) || idName) await imagesDir.removeEntry(entry.name).catch(() => {});
       }
 
       vault.stamp = stamp;
@@ -2418,6 +2557,7 @@
         if (state.detailId) renderDetail();
         toast(contar(healed, "imagem voltou", "imagens voltaram") + " da pasta para as referências", { tone: "success" });
       }
+      return true;
     } catch (error) {
       console.error("Falha ao gravar a pasta do acervo", error);
       vault.error = (error && error.message) || String(error);
@@ -2426,6 +2566,7 @@
       // desiste depois de algumas vezes em vez de insistir pra sempre.
       if (vaultFailures <= 3) vaultDirty = true;
       setVaultStatus("error");
+      return false;
     } finally {
       vaultWriting = false;
       if (vaultDirty) scheduleVaultSave(vaultFailures > 0 ? vaultFailures * 5000 : 400);
@@ -2452,19 +2593,22 @@
 
     for (const raw of parsed.items || []) {
       if (!raw || !raw.id) continue;
-      const { imageData, image, ...rest } = raw;
+      const { imageData, image, imagePendente, ...rest } = raw;
+      const path = image || imagePendente;
       const current = itemMap.get(raw.id);
-      const hasImage = Boolean(imageData || image);
+      const hasImage = Boolean(imageData || path);
       const lacking = hasImage && !(current && current.imageBlob);
 
       let blob = null;
       if (lacking) {
-        blob = imageData ? await (await fetch(imageData)).blob() : await resolveImage(raw);
+        blob = imageData ? await (await fetch(imageData)).blob()
+          : await resolveImage(Object.assign({}, raw, { image: path }));
         if (blob) blob = await inMemory(blob);
       }
 
-      if (current && (current.updatedAt || 0) > (raw.updatedAt || 0)) {
-        // A daqui foi editada depois: fica como está, só ganha a imagem se faltava.
+      if (current && (current.updatedAt || 0) >= (raw.updatedAt || 0)) {
+        // A daqui é a mesma ou foi editada depois: fica como está, só ganha a
+        // imagem se faltava. Igual não conta como importada.
         if (blob) {
           const { image: _pendente, ...mine } = current;
           items.push(Object.assign({}, mine, { imageBlob: blob,
@@ -2473,39 +2617,30 @@
         continue;
       }
 
-      const item = Object.assign({}, rest, {
-        tags: Array.isArray(rest.tags) ? rest.tags : [],
-        boardIds: Array.isArray(rest.boardIds) ? rest.boardIds : [],
-        favorite: Boolean(rest.favorite),
-      });
+      const item = normalizeImported(rest);
       const imageBlob = blob || (current && current.imageBlob);
       if (imageBlob) {
         item.imageBlob = imageBlob;
         if (!item.imageRatio) item.imageRatio = await imageRatioOf(imageBlob);
       } else if (hasImage) {
         // Fica anotado de onde a imagem viria: a pasta, quando aparecer, completa.
-        if (image) item.image = image;
+        if (path) item.image = path;
         semImagem++;
       }
       items.push(item);
     }
 
-    if (items.length || boards.length) {
+    const applied = mergeIntoState(items, boards);
+    if (applied.length || boards.length) {
       await dbPutMany(S_BOARDS, boards);
-      await dbPutMany(S_ITEMS, items);
-
-      boards.forEach((b) => boardMap.set(b.id, b));
-      items.forEach((i) => { releaseCover(i.id); itemMap.set(i.id, i); });
-
-      state.boards = [...boardMap.values()]; sortBoards();
-      state.items = [...itemMap.values()];
+      await dbPutMany(S_ITEMS, applied);
       // Chegou um acervo de verdade: os exemplos que você nunca tocou saem.
-      if (items.length) await dropSeedLeftovers(parsed);
+      if (applied.length) await dropSeedLeftovers(parsed);
       state.selection = { type: "todos" };
       renderRail(); renderHead(); renderGrid();
     }
 
-    return { items: items.length, boards: boards.length, semImagem };
+    return { items: applied.length, boards: boards.length, semImagem };
   }
 
   const contar = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
@@ -2565,6 +2700,8 @@
   }
 
   async function useVaultDir(dir) {
+    // Uma gravação em curso termina na pasta antiga antes da troca.
+    await waitVaultIdle();
     const previous = {
       dir: vault.dir, name: vault.name, stamp: vault.stamp,
       index: vault.index, kept: vault.kept, versions: vault.versions, historyDay: vault.historyDay, rescue: vault.rescue,
@@ -2633,6 +2770,7 @@
   const restoreRescue = () => restoreVersion(VAULT_RESCUE);
 
   async function forgetVault() {
+    await waitVaultIdle();
     vault.dir = null;
     vault.name = "";
     vault.stamp = "";
@@ -2671,9 +2809,22 @@
       console.error("Falha ao ler a pasta do acervo", error);
       vault.error = (error && error.message) || String(error);
       setVaultStatus("error");
+      // A próxima gravação vai substituir esse acervo.json que não deu pra
+      // ler (meio sincronizado, de outro app…). Antes, uma cópia dele vai
+      // pro histórico, do jeito que está.
+      await preserveUnreadable().catch(() => {});
       return;
     }
     scheduleVaultSave(600);
+  }
+
+  async function preserveUnreadable() {
+    const handle = await vault.dir.getFileHandle(VAULT_FILE).catch(() => null);
+    const file = handle && await handle.getFile();
+    if (!file || !file.size) return;
+    const history = await vault.dir.getDirectoryHandle(VAULT_HISTORY, { create: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    await writeVaultFile(history, "acervo-ilegivel-" + stamp + ".json", await file.text());
   }
 
   /* ── importar uma pasta e completar imagens ──────────────────────── */
@@ -2742,11 +2893,15 @@
     if (!files.length) return;
     const byPath = new Map(files.map((file) => [lower(relPath(file)), file]));
 
+    // Vale tanto a pasta do acervo quanto a de cima dela: o que conta é o nome
+    // do arquivo (acervo.json, acervo-anterior.json) ou estar em historico/.
     const candidates = [];
     for (const [rel, file] of byPath) {
       if (!rel.endsWith(".json")) continue;
-      const isHistory = rel.startsWith(VAULT_HISTORY + "/") && rel.split("/").length === 2;
-      if (rel.includes("/") && !isHistory) continue;
+      const parts = rel.split("/");
+      const name = parts[parts.length - 1];
+      const parent = parts.length > 1 ? parts[parts.length - 2] : "";
+      if (parts.length > 1 && name !== VAULT_FILE && name !== VAULT_RESCUE && parent !== VAULT_HISTORY) continue;
       try {
         const parsed = JSON.parse(await file.text());
         if (isLibraryFile(parsed) && parsed.items.length) candidates.push({ rel: relPath(file), parsed });
@@ -2767,14 +2922,17 @@
       return;
     }
 
-    const rank = (rel) => lower(rel) === VAULT_FILE ? 0 : lower(rel) === VAULT_RESCUE ? 1 : rel.startsWith(VAULT_HISTORY) ? 2 : 3;
+    const rank = (rel) => {
+      const name = lower(baseName(rel));
+      return name === VAULT_FILE ? 0 : name === VAULT_RESCUE ? 1 : lower(rel).includes(VAULT_HISTORY + "/") ? 2 : 3;
+    };
     candidates.sort((a, b) => rank(a.rel) - rank(b.rel) || (b.rel > a.rel ? 1 : b.rel < a.rel ? -1 : 0));
     const chosen = candidates.length === 1 ? candidates[0] : await chooseVersion(candidates);
     if (!chosen) return;
 
     // Quem é dono de cada imagem hoje está no acervo.json; a versão escolhida
     // pode citar nomes antigos, de antes de um título mudar.
-    const live = candidates.find((candidate) => lower(candidate.rel) === VAULT_FILE);
+    const live = candidates.find((candidate) => lower(baseName(candidate.rel)) === VAULT_FILE);
     const index = new Map([...indexFromSnapshot(chosen.parsed), ...(live ? indexFromSnapshot(live.parsed) : [])]);
     // Pelo caminho primeiro; pelo nome do arquivo quando a pasta escolhida
     // não é a raiz do acervo (alguém escolheu a de cima, por exemplo).
@@ -2819,13 +2977,25 @@
    * de ninguém, pra seguirem como imagens novas.
    */
   async function completeFromFiles(files) {
+    // Nome que serve a mais de uma referência sem imagem é ambíguo: a imagem
+    // entra como nova em vez de cair na referência errada.
     const missing = new Map();
+    const claim = (key, item) => {
+      const other = missing.get(key);
+      missing.set(key, other && other !== item ? null : item);
+    };
     const present = new Set();
     for (const item of state.items) {
-      if (item.imageBlob) { present.add(lower(item.id)); continue; }
-      missing.set(lower(item.id), item);
-      if (item.image) missing.set(lower(baseName(item.image)), item);
-      if (vault.index.has(item.id)) missing.set(lower(vault.index.get(item.id)), item);
+      if (item.imageBlob) {
+        // Já tem imagem: o arquivo dela na pasta (pelo id antigo ou pelo
+        // título) arrastado de volta não vira uma cópia.
+        present.add(lower(item.id));
+        if (vault.index.has(item.id)) present.add(lower(vault.index.get(item.id)));
+        continue;
+      }
+      claim(lower(item.id), item);
+      if (item.image) claim(lower(baseName(item.image)), item);
+      if (vault.index.has(item.id)) claim(lower(vault.index.get(item.id)), item);
     }
 
     let matched = 0, already = 0;
@@ -2833,12 +3003,12 @@
     for (const file of files) {
       const name = lower(file.name);
       const item = missing.get(name) || missing.get(stemOf(name));
-      if (item && !item.imageBlob) {
+      if (present.has(name) || present.has(stemOf(name))) {
+        already++;
+      } else if (item && !item.imageBlob) {
         await attachImage(item.id, file);
         item.imageBlob = file;
         matched++;
-      } else if (present.has(stemOf(name))) {
-        already++;
       } else {
         rest.push(file);
       }
@@ -2874,10 +3044,21 @@
       if (!original.imageBlob) {
         await attachImage(original.id, copy.imageBlob, { ratio: copy.imageRatio });
       } else if (copy.createdAt !== copy.updatedAt) {
-        continue; // cópia que você já editou é sua: fica
+        continue; // a original já tem imagem e a cópia você editou: ela é sua, fica
       }
-      const boardIds = [...new Set([...(original.boardIds || []), ...(copy.boardIds || [])])];
-      if (boardIds.length !== (original.boardIds || []).length) await updateItem(original.id, { boardIds });
+      // O que você fez na cópia vai junto pra original: boards, tags,
+      // anotações e favorito.
+      const fresh = state.items.find((item) => item.id === original.id) || original;
+      const patch = {};
+      const boardIds = [...new Set([...(fresh.boardIds || []), ...(copy.boardIds || [])])];
+      if (boardIds.length !== (fresh.boardIds || []).length) patch.boardIds = boardIds;
+      const tags = [...new Set([...(fresh.tags || []), ...(copy.tags || [])])];
+      if (tags.length !== (fresh.tags || []).length) patch.tags = tags;
+      if (copy.notes && copy.notes !== fresh.notes) {
+        patch.notes = fresh.notes ? fresh.notes + "\n\n" + copy.notes : copy.notes;
+      }
+      if (copy.favorite && !fresh.favorite) patch.favorite = true;
+      if (Object.keys(patch).length) await updateItem(original.id, patch);
       drop.add(copy.id);
       joined++;
     }
@@ -3006,11 +3187,10 @@
       if (on) {
         const salvarCopia = el("button", { class: "btn btn-ghost",
           onclick: async () => {
-            await flushVault({ checkpoint: true });
+            const ok = await flushVault({ checkpoint: true });
             await loadVersions();
-            toast(vault.status === "ready"
-              ? "Cópia salva em " + VAULT_RESCUE
-              : "Não consegui salvar a cópia agora", { tone: vault.status === "ready" ? "success" : "error" });
+            toast(ok ? "Cópia salva em " + VAULT_RESCUE : "Não consegui salvar a cópia agora",
+              { tone: ok ? "success" : "error" });
           } }, [svg(ICON.download, 14), "Salvar uma cópia agora"]);
 
         const list = versions === null
@@ -3048,7 +3228,7 @@
           el("pre", { class: "snippet", text: (on ? vault.name : "Referências")
             + "/\n├─ acervo.json            o acervo agora, a cada alteração"
             + "\n├─ " + VAULT_RESCUE + "   a cópia que você salva no botão"
-            + "\n├─ " + VAULT_HISTORY + "/              uma versão por dia de uso, sozinha"
+            + "\n├─ " + VAULT_HISTORY + "/             uma versão por dia de uso, sozinha"
             + "\n└─ imagens/               cada imagem com o nome que você deu" }),
           el("div", { class: "row-actions" }, [
             vault.status === "permission"
@@ -3279,7 +3459,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
     const sorted = result.slice();
     if (state.sort === "antigos") sorted.sort((a, b) => a.createdAt - b.createdAt);
-    else if (state.sort === "titulo") sorted.sort((a, b) => a.title.localeCompare(b.title, "pt-BR"));
+    else if (state.sort === "titulo") sorted.sort((a, b) => String(a.title || "").localeCompare(String(b.title || ""), "pt-BR"));
     else if (state.sort === "abertos") sorted.sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
     else sorted.sort((a, b) => b.createdAt - a.createdAt);
     return sorted;
@@ -3356,7 +3536,8 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     else if (url && item.imageRatio) box.style.aspectRatio = String(item.imageRatio);
 
     if (url) {
-      box.append(el("img", { src: url, alt: "", loading: "lazy", decoding: "async" }));
+      // draggable=false: arrastar a capa dentro da página criava uma cópia da imagem.
+      box.append(el("img", { src: url, alt: "", loading: "lazy", decoding: "async", draggable: "false" }));
       return box;
     }
 
@@ -3821,12 +4002,15 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
   }
 
   function emptyState() {
-    const filtering = state.query.trim().length > 0;
+    const query = state.query.trim();
+    // Filtro de tipo também esvazia a lista: aí a mensagem é sobre o filtro,
+    // não "board vazio" nem "nenhum favorito".
+    const filtering = query.length > 0 || state.kinds.length > 0;
     const sel = state.selection.type;
     let title, body, action = null, aside = null;
 
     if (filtering) {
-      title = `Nada encontrado para “${state.query.trim()}”`;
+      title = query ? `Nada encontrado para “${query}”` : "Nenhuma referência deste tipo aqui";
       body = "Tente outra palavra, ou limpe os filtros pra ver tudo de novo.";
       action = { label: "Limpar filtros", run: clearFilters };
     } else if (!state.items.length) {
@@ -3846,7 +4030,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       title = "Nenhum favorito ainda";
       body = "Aperte F sobre um card (ou clique na estrela) pra deixar as referências mais importantes sempre à mão.";
     } else if (sel === "recentes") {
-      title = "Nada aberto ainda nesta sessão";
+      title = "Nada aberto ainda";
       body = "As referências que você abrir aparecem aqui, na ordem em que foram consultadas.";
     } else {
       title = "Nada por aqui";
@@ -3894,12 +4078,26 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     return false;
   }
 
-  function openDetail(id) {
+  /**
+   * `navigating`: veio das setas/J/K do próprio painel. A ordem da navegação é
+   * a da lista no momento em que o painel abriu — senão, em "Vistos
+   * recentemente", abrir uma referência a jogava pro topo e J/K ficavam
+   * pulando entre as duas primeiras.
+   */
+  function openDetail(id, { navigating = false } = {}) {
+    if (!navigating || !detailOrder) detailOrder = visibleItems().map((item) => item.id);
     state.detailId = id;
     state.focusedId = id;
     touchOpened(id);
     renderGrid();
     renderDetail();
+  }
+
+  /** A ordem de navegação do painel aberto, sem o que foi apagado no meio. */
+  let detailOrder = null;
+  function detailList() {
+    const alive = new Set(state.items.map((item) => item.id));
+    return (detailOrder || visibleItems().map((item) => item.id)).filter((id) => alive.has(id));
   }
 
   /** No painel de uma imagem que não veio junto: como trazê-la de volta. */
@@ -3908,7 +4106,8 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     picker.addEventListener("change", async () => {
       const file = picker.files && picker.files[0];
       if (!file) return;
-      const isVector = file.type === "image/svg+xml";
+      // SVG e GIF entram como estão: redesenhar no canvas perderia o vetor e a animação.
+      const isVector = file.type === "image/svg+xml" || file.type === "image/gif";
       const { blob, ratio } = isVector ? { blob: file, ratio: 1 } : await compressImage(file);
       await attachImage(item.id, blob, { ratio });
       scheduleVaultSave();
@@ -3931,8 +4130,26 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     state.detailId = null;
     if (detailClose) { detailClose(); detailClose = null; }
     detailDom = null;
+    detailOrder = null;
+    pendingDetail = false;
     renderGrid();
   }
+
+  /**
+   * Com o botão do mouse apertado, o painel não é redesenhado: apertar um
+   * botão tira o foco do campo que você editava, o campo salva, e redesenhar
+   * naquele instante trocava o botão por outro antes de o clique terminar —
+   * o clique se perdia. O redesenho espera o clique acabar.
+   */
+  let pointerHeld = false;
+  let pendingDetail = false;
+  document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+  const releasePointer = () => setTimeout(() => {
+    pointerHeld = false;
+    if (pendingDetail) { pendingDetail = false; if (state.detailId) renderDetail(); }
+  }, 0);
+  document.addEventListener("pointerup", releasePointer, true);
+  document.addEventListener("pointercancel", releasePointer, true);
 
   let detailClose = null;
   /** O painel aberto: { id, panel }. Editar redesenha dentro dele, sem reabrir. */
@@ -3946,6 +4163,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     // entrada, sem perder a rolagem e sem tirar o cursor do campo em que você
     // estava. Antes cada edição fechava e reabria o painel inteiro.
     const reuse = Boolean(detailDom && detailDom.panel.isConnected);
+    if (reuse && pointerHeld) { pendingDetail = true; return; }
     let keep = null;
     if (reuse) {
       const active = document.activeElement;
@@ -3962,28 +4180,32 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       detailClose(); detailClose = null;
     }
 
-    const list = visibleItems();
-    const index = list.findIndex((i) => i.id === item.id);
+    const list = detailList();
+    const index = list.indexOf(item.id);
 
     const scrim = el("div", { class: "scrim", onclick: closeDetail });
     const panel = el("aside", { class: "drawer", role: "dialog", "aria-modal": "true", "aria-label": item.title });
 
+    // Cada botão tem uma chave (data-field) pra o foco do teclado voltar a ele
+    // depois de um redesenho.
     const navButton = (direction, label, enabled) => el("button", {
       class: "icon-btn", "aria-label": label, disabled: !enabled,
+      dataset: { field: direction === -1 ? "nav-prev" : "nav-next" },
       style: enabled ? "" : "opacity:.3;cursor:default",
-      onclick: () => { if (enabled) openDetail(list[index + direction].id); },
+      onclick: () => { if (enabled) openDetail(list[index + direction], { navigating: true }); },
       html: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(${direction === -1 ? 180 : 0}deg)">${ICON.chevron}</svg>`,
     });
 
     panel.append(el("header", { class: "drawer-head" }, [
-      el("button", { class: "icon-btn", "aria-label": "Fechar (Esc)", onclick: closeDetail,
+      el("button", { class: "icon-btn", "aria-label": "Fechar (Esc)", onclick: closeDetail, dataset: { field: "close" },
         html: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">${ICON.close}</svg>` }),
       el("span", { class: "spacer" }),
       navButton(-1, "Referência anterior (K)", index > 0),
       navButton(1, "Próxima referência (J)", index >= 0 && index < list.length - 1),
       el("span", { style: "width:1px;height:16px;background:var(--border);margin:0 4px" }),
       el("button", {
-        class: "icon-btn", "aria-label": item.favorite ? "Remover dos favoritos" : "Favoritar (F)",
+        class: "icon-btn", "aria-label": item.favorite ? "Remover dos favoritos (F)" : "Favoritar (F)",
+        dataset: { field: "fav" },
         style: item.favorite ? "color:var(--accent)" : "",
         onclick: () => toggleFavorite(item.id),
         html: `<svg width="16" height="16" viewBox="0 0 24 24" fill="${item.favorite ? "currentColor" : "none"}" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">${ICON.star}</svg>` }),
@@ -4066,12 +4288,14 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       const colors = item.colors || [];
       const list = el("div", { class: "swatch-list" });
 
-      const copy = async (value, node, done) => {
+      // `resting` é o texto de sempre do botão: lido na hora do clique, um
+      // segundo clique rápido guardava "copiado!" como original e ficava preso.
+      const copy = async (value, node, done, resting) => {
         try {
           await navigator.clipboard.writeText(value);
-          const original = node.textContent;
           node.textContent = done;
-          setTimeout(() => { node.textContent = original; }, 1200);
+          clearTimeout(node._restore);
+          node._restore = setTimeout(() => { node.textContent = resting; }, 1200);
         } catch {
           toast("Não consegui copiar — o navegador bloqueou", { tone: "error" });
         }
@@ -4092,7 +4316,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
         chip.append(picker);
 
         const hex = el("button", { class: "swatch-hex", text: color });
-        hex.addEventListener("click", () => copy(color, hex, "copiado!"));
+        hex.addEventListener("click", () => copy(color, hex, "copiado!", color));
 
         list.append(el("div", { class: "swatch-row" }, [
           chip, hex,
@@ -4107,21 +4331,28 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
       const newColor = el("input", { type: "color", value: "#d97757", "aria-label": "Escolher cor" });
       const newHex = el("input", { type: "text", placeholder: "#rrggbb ou cole várias de uma vez", dataset: { field: "new-hex" } });
-      const addColors = () => {
-        const parsed = parsePalette(newHex.value) || (normalizeHex(newHex.value) ? [normalizeHex(newHex.value)] : null);
-        const toAdd = parsed || [normalizeHex(newColor.value)].filter(Boolean);
+      const pushColors = (toAdd) => {
         const next = colors.slice();
         toAdd.forEach((color) => { if (color && !next.includes(color)) next.push(color); });
-        newHex.value = "";
         if (next.length !== colors.length) updateItem(item.id, { colors: next }).then(afterEdit);
+      };
+      // Texto digitado manda; o seletor só entra com o campo vazio. Texto que
+      // não é cor fica no campo, com aviso, em vez de virar a cor do seletor.
+      const addColors = () => {
+        const typed = newHex.value.trim();
+        if (!typed) { pushColors([normalizeHex(newColor.value)]); return; }
+        const parsed = parsePalette(typed) || (normalizeHex(typed) ? [normalizeHex(typed)] : null);
+        if (!parsed) { toast(`“${typed}” não é uma cor — use #rrggbb`, { tone: "error" }); return; }
+        newHex.value = "";
+        pushColors(parsed);
       };
       newHex.addEventListener("keydown", (event) => {
         if (event.key === "Enter") { event.preventDefault(); addColors(); }
       });
-      newColor.addEventListener("change", addColors);
+      newColor.addEventListener("change", () => pushColors([normalizeHex(newColor.value)]));
 
       const copyAll = el("button", { class: "btn btn-ghost", text: "Copiar todas" });
-      copyAll.addEventListener("click", () => copy(colors.join(" "), copyAll, "Copiado!"));
+      copyAll.addEventListener("click", () => copy(colors.join(" "), copyAll, "Copiado!", "Copiar todas"));
 
       content.append(el("section", {}, [
         el("span", { class: "field-label", text: "Cores" }),
@@ -4170,7 +4401,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     state.boards.forEach((board) => {
       const on = item.boardIds.includes(board.id);
       boardBox.append(el("button", {
-        class: "board-toggle", "aria-pressed": on ? "true" : "false",
+        class: "board-toggle", "aria-pressed": on ? "true" : "false", dataset: { field: "board:" + board.id },
         onclick: () => updateItem(item.id, {
           boardIds: on ? item.boardIds.filter((b) => b !== board.id) : item.boardIds.concat(board.id),
         }).then(afterEdit),
@@ -4192,7 +4423,8 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
           el("span", { class: "rel-main" }, [
             el("span", { class: "rel-title", text: candidate.title }),
             el("span", { class: "rel-sub",
-              text: candidate.tags.slice(0, 3).join(" · ") || hostOf(candidate.url) || "Nota" }),
+              text: candidate.tags.slice(0, 3).join(" · ") || hostOf(candidate.url)
+                || ({ image: "Imagem", palette: "Paleta", note: "Nota" })[candidate.kind] || "Link" }),
           ]),
           svg(ICON.chevron, 14),
         ]));
@@ -4210,14 +4442,18 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       live.replaceChildren(...panel.childNodes);
       live.setAttribute("aria-label", item.title);
       detailDom.id = item.id;
-      if (keep.same) {
-        live.querySelector(".drawer-body").scrollTop = keep.scroll;
-        const field = keep.field && live.querySelector(`[data-field="${keep.field}"]`);
-        if (field) {
-          // O que você já tinha digitado no campo continua lá.
-          if (keep.value !== null && field.value !== keep.value) field.value = keep.value;
-          field.focus({ preventScroll: true });
-          if (keep.start !== null) { try { field.setSelectionRange(keep.start, keep.end); } catch { /* campo sem seleção */ } }
+      if (keep.same) live.querySelector(".drawer-body").scrollTop = keep.scroll;
+      // O foco volta pro mesmo controle — na mesma referência, qualquer um;
+      // indo pra outra com as setas, as próprias setas.
+      const navigatingKey = keep.field && keep.field.startsWith("nav");
+      const field = keep.field && (keep.same || navigatingKey)
+        && live.querySelector(`[data-field="${CSS.escape(keep.field)}"]`);
+      if (field) {
+        // O que você já tinha digitado no campo continua lá.
+        if (keep.same && keep.value !== null && "value" in field && field.value !== keep.value) field.value = keep.value;
+        field.focus({ preventScroll: true });
+        if (keep.start !== null && typeof field.setSelectionRange === "function") {
+          try { field.setSelectionRange(keep.start, keep.end); } catch { /* campo sem seleção */ }
         }
       }
     } else {
@@ -4244,7 +4480,13 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
   /* ══════════════════════════ paleta ⌘K ═══════════════════════════ */
 
+  const hintFor = (item) => hostOf(item.url)
+    || ({ note: "nota", image: "imagem", palette: "paleta" })[item.kind] || "link";
+
   function openPalette() {
+    // ⌘K com a busca já aberta só volta o cursor pra ela, sem abrir outra por cima.
+    const open = $("palette-input");
+    if (open) { open.focus(); open.select(); return; }
     let rows = [], active = 0;
 
     const input = el("input", { id: "palette-input", placeholder: "Buscar referência, board ou tag…", autocomplete: "off" });
@@ -4279,13 +4521,13 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
           .slice(0, 6)
           .forEach((item) => rows.push({
             group: "Continuar de onde parou", label: item.title, item,
-            hint: hostOf(item.url) || (item.kind === "note" ? "nota" : "imagem"),
+            hint: hintFor(item),
             run: () => openDetail(item.id),
           }));
       } else {
         searchItems(state.items, query).slice(0, 8).forEach((item) => rows.push({
           group: "Referências", label: item.title, item,
-          hint: hostOf(item.url) || (item.kind === "note" ? "nota" : "imagem"),
+          hint: hintFor(item),
           run: () => openDetail(item.id),
         }));
 
@@ -4439,9 +4681,10 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       ? el("button", { class: "btn btn-danger left", text: "Excluir board", onclick: async (event) => {
           if (!confirming) {
             confirming = true;
-            const count = state.items.filter((i) => i.boardIds.includes(board.id)).length;
+            // Solto fica só o que não está em nenhum outro board.
+            const count = state.items.filter((i) => i.boardIds.length === 1 && i.boardIds[0] === board.id).length;
             event.currentTarget.textContent = count
-              ? `Confirmar exclusão (${count} itens ficam soltos)` : "Confirmar exclusão";
+              ? `Confirmar exclusão (${contar(count, "item fica solto", "itens ficam soltos")})` : "Confirmar exclusão";
             return;
           }
           await deleteBoard(board.id);
@@ -4587,6 +4830,8 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
         // O JSON sozinho não traz as imagens da pasta: o aviso oferece
         // escolher a pasta, e elas completam as referências que ficaram sem.
         reportImport({ items, boards, semImagem });
+        // Fecha os ajustes: os números do topo eram de antes do import.
+        dismiss();
         void tidyLibrary();
       } catch (error) {
         toast(error.message || "Arquivo inválido", { tone: "error" });
@@ -4651,14 +4896,16 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
             el("button", { class: "btn btn-danger", text: "Limpar acervo", onclick: async (event) => {
               if (!confirming) {
                 confirming = true;
-                event.currentTarget.textContent = `Confirmar: apagar ${state.items.length} itens`;
+                event.currentTarget.textContent = `Confirmar: apagar ${contar(state.items.length, "item", "itens")}`;
                 return;
               }
               // O acervo de agora vai pro histórico antes de sumir do espelho.
               let guardada = null;
               if (vaultOn()) {
-                await flushVault();
-                guardada = await saveHistoryNow("antes-de-limpar").catch(() => null);
+                // Só guarda a versão se a pasta estiver em dia: copiar um
+                // acervo.json atrasado e depois apagar perderia o que veio depois.
+                const emDia = await flushVault();
+                guardada = emDia ? await saveHistoryNow("antes-de-limpar").catch(() => null) : null;
                 if (!guardada && state.items.length) {
                   toast("Não consegui guardar uma versão antes de limpar — nada foi apagado", { tone: "error" });
                   return;
@@ -4763,11 +5010,12 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
   }
 
   async function removeItem(item) {
-    const snapshot = Object.assign({}, item);
+    // O desfazer guarda a versão de agora, não a que o painel tinha ao abrir.
+    const snapshot = Object.assign({}, state.items.find((i) => i.id === item.id) || item);
     await deleteItem(item.id);
     if (state.detailId === item.id) closeDetail();
     renderRail(); renderGrid();
-    toast(`“${item.title.slice(0, 40)}” excluída`, {
+    toast(`“${String(snapshot.title || "Referência").slice(0, 40)}” excluída`, {
       action: {
         label: "Desfazer",
         run: async () => { await createItem(snapshot); renderRail(); renderGrid(); },
@@ -4801,16 +5049,17 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     return value ? [value] : [];
   }
 
-  async function saveLinks(urls, boardIds) {
+  /** `notes`: o texto que veio junto com o link vira a anotação dele. */
+  async function saveLinks(urls, boardIds, notes) {
     const normalized = [...new Set(urls.map(normalizeUrl).filter(Boolean))];
     if (!normalized.length) throw new Error("Nenhuma URL válida no que você colou");
 
     return createItems(normalized.map((url) => {
       const title = titleFromUrl(url);
-      return {
+      return Object.assign({
         kind: "link", title, url, siteName: hostOf(url),
-        boardIds, tags: suggestTags({ url, title }),
-      };
+        boardIds, tags: suggestTags({ url, title, description: notes }),
+      }, notes ? { notes } : {});
     }));
   }
 
@@ -4829,7 +5078,9 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     if (!trimmed) throw new Error("A nota está vazia");
     const [first, ...rest] = trimmed.split("\n");
     const title = first.length > 90 ? first.slice(0, 88).trimEnd() + "…" : first;
-    const body = rest.join("\n").trim() || (first.length > 90 ? trimmed : undefined);
+    // Primeira linha cortada no título: o corpo leva o texto inteiro, senão o
+    // pedaço cortado sumia.
+    const body = first.length > 90 ? trimmed : (rest.join("\n").trim() || undefined);
     return createItem({ kind: "note", title, description: body, boardIds, tags: suggestTags({ title, description: body }, 3) });
   }
 
@@ -4846,7 +5097,12 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
         ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
         const ratio = image.width / image.height || 1;
         URL.revokeObjectURL(url);
-        canvas.toBlob((blob) => resolve({ blob: blob || file, ratio }), "image/webp", quality);
+        // Só fica com a versão nova se ela compensar: uma imagem pequena já
+        // otimizada pode sair maior, e navegador sem WebP devolve PNG.
+        canvas.toBlob((blob) => {
+          const better = blob && (blob.size < file.size || (scale < 1 && blob.type === "image/webp"));
+          resolve({ blob: better ? blob : file, ratio });
+        }, "image/webp", quality);
       };
       image.onerror = () => { URL.revokeObjectURL(url); resolve({ blob: file, ratio: 1 }); };
       image.src = url;
@@ -4856,7 +5112,8 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
   async function saveImages(images, boardIds) {
     const drafts = [];
     for (const file of images) {
-      const isVector = file.type === "image/svg+xml";
+      // SVG e GIF entram como estão: redesenhar no canvas perderia o vetor e a animação.
+      const isVector = file.type === "image/svg+xml" || file.type === "image/gif";
       const { blob, ratio } = isVector ? { blob: file, ratio: 1 } : await compressImage(file);
       // O título é o nome que a imagem vai ter na pasta: hash e "image.png"
       // viram "Imagem sem nome", pra você dar o nome de verdade.
@@ -4890,10 +5147,13 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
         state.focusedId = saved.id;
         toast(`${palette.length === 1 ? "Cor" : "Paleta"} “${saved.title}” salva`, { tone: "success" });
       } else if (urls.length) {
-        const saved = await saveLinks(urls, targetBoards());
+        // A frase em volta do link não se perde: ela inteira, do jeito que
+        // foi escrita, vira a anotação dele.
+        const extra = textBesideUrls(text, urls) ? text : "";
+        const saved = await saveLinks(urls, targetBoards(), extra || undefined);
         state.focusedId = saved[0].id;
-        toast(saved.length > 1 ? `${saved.length} links salvos` : `“${saved[0].title.slice(0, 42)}” salvo`,
-          { tone: "success" });
+        toast((saved.length > 1 ? `${saved.length} links salvos` : `“${saved[0].title.slice(0, 42)}” salvo`)
+          + (extra ? " — o texto foi junto como anotação" : ""), { tone: "success" });
         if (!firstLinkHintShown) {
           firstLinkHintShown = true;
           setTimeout(() => toast("Nesta demo o título vem da URL — clique no card pra editar", {
@@ -4944,7 +5204,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     const input = $("capture-input");
     const value = input.value.trim();
     const palette = parsePalette(value);
-    const urls = palette ? [] : extractUrls(value);
+    const urls = palette ? [] : [...new Set(extractUrls(value).map(normalizeUrl).filter(Boolean))];
     const mode = !value ? "empty" : palette ? "palette" : urls.length ? "link" : "note";
 
     const icon = $("capture-icon");
@@ -5067,6 +5327,10 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
           && event.target.closest(".drawer")) {
         event.target.blur();
         closeDetail();
+      } else if (event.key === "Escape" && isTyping(event.target) && event.target.closest(".modal")) {
+        // Num diálogo (novo board, ajustes), Esc fecha mesmo com o cursor num campo.
+        event.target.blur();
+        closeTopOverlay();
       }
       return;
     }
@@ -5079,7 +5343,9 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
     if (overlayStack.length) return;
 
-    switch (event.key) {
+    // Caps Lock ligado não desliga os atalhos: "A" vale como "a".
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    switch (key) {
       case "a": event.preventDefault(); focusCapture(); return;
       case "/": event.preventDefault(); $("filter-input").focus(); return;
       case "b": event.preventDefault(); openBoardDialog(null); return;
@@ -5093,12 +5359,17 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       case "k": event.preventDefault(); moveFocus("previous"); return;
     }
 
-    const target = state.items.find((i) => i.id === state.focusedId);
+    // Enter num botão com foco é do botão, não do card selecionado.
+    if (event.key === "Enter" && event.target.closest && event.target.closest("button, a, [role=button]")) return;
+
+    // Só age sobre o card que está na tela: uma referência recém-salva fora
+    // do recorte atual não é apagada nem favoritada sem ser vista.
+    const target = visibleItems().find((i) => i.id === state.focusedId);
     if (!target) return;
 
     if (event.key === "Enter") { event.preventDefault(); openDetail(target.id); }
-    else if (event.key === "o") { event.preventDefault(); openSource(target); }
-    else if (event.key === "f") { event.preventDefault(); toggleFavorite(target.id); }
+    else if (key === "o") { event.preventDefault(); openSource(target); }
+    else if (key === "f") { event.preventDefault(); toggleFavorite(target.id); }
     else if (event.key === "Delete" || event.key === "Backspace") {
       event.preventDefault(); removeItem(target);
     }
@@ -5106,12 +5377,18 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
   function onDetailKeyDown(event) {
     if (!state.detailId || overlayStack.length > 1) return;
-    if (isTyping(event.target) || event.metaKey || event.ctrlKey) return;
+    if (isTyping(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
 
-    const list = visibleItems();
-    const index = list.findIndex((i) => i.id === state.detailId);
-    if (event.key === "j" && index < list.length - 1) { event.preventDefault(); openDetail(list[index + 1].id); }
-    else if (event.key === "k" && index > 0) { event.preventDefault(); openDetail(list[index - 1].id); }
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    const list = detailList();
+    const index = list.indexOf(state.detailId);
+    const item = state.items.find((i) => i.id === state.detailId);
+    if (key === "j" && index !== -1 && index < list.length - 1) { event.preventDefault(); openDetail(list[index + 1], { navigating: true }); }
+    else if (key === "k" && index > 0) { event.preventDefault(); openDetail(list[index - 1], { navigating: true }); }
+    // Os atalhos que o painel anuncia valem com ele aberto.
+    else if (key === "f" && item) { event.preventDefault(); toggleFavorite(item.id); }
+    else if (key === "o" && item && item.url) { event.preventDefault(); openSource(item); }
+    else if (key === "Delete" && item) { event.preventDefault(); removeItem(item); }
   }
 
   /* ═══════════════════════ colar e arrastar ═══════════════════════ */
@@ -5152,16 +5429,29 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       }
       applyTheme();
 
-      if (!boards.length && !items.length && !(prefs && prefs.onboarded)) {
+      // O que entrou enquanto o banco abria — uma captura rápida, a pasta
+      // conectada antes da hora — não é atropelado pelo que veio do banco:
+      // a versão em memória é a mais nova.
+      const adopt = (loadedBoards, loadedItems) => {
+        const itemIds = new Set(state.items.map((item) => item.id));
+        const boardIds = new Set(state.boards.map((board) => board.id));
+        state.items = [...state.items, ...loadedItems.filter((item) => !itemIds.has(item.id))];
+        state.boards = [...state.boards, ...loadedBoards.filter((board) => !boardIds.has(board.id))];
+        sortBoards();
+      };
+
+      if (!boards.length && !items.length && !(prefs && prefs.onboarded) && !state.items.length) {
         const seed = await buildSeed();
-        await rawPutMany(S_BOARDS, seed.boards);
-        await rawPutMany(S_ITEMS, seed.items);
         await rawPut(S_PREFS, { view: state.view, sort: state.sort, theme: state.theme, onboarded: true }, "app");
-        state.boards = seed.boards;
-        state.items = seed.items;
+        // Se um acervo de verdade chegou enquanto os exemplos eram pintados,
+        // os exemplos ficam de fora.
+        if (!state.items.length) {
+          await rawPutMany(S_BOARDS, seed.boards);
+          await rawPutMany(S_ITEMS, seed.items);
+          adopt(seed.boards, seed.items);
+        }
       } else {
-        state.boards = boards; sortBoards();
-        state.items = items;
+        adopt(boards, items);
       }
 
       // A pasta do acervo é a cópia que sobrevive ao navegador: se ela existe,
@@ -5258,15 +5548,19 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       const palette = parsePalette(trimmed);
       if (palette) {
         event.preventDefault();
-        const saved = await savePalette(palette, targetBoards());
-        state.focusedId = saved.id;
-        renderRail(); renderGrid();
-        toast(`${palette.length === 1 ? "Cor" : "Paleta"} “${saved.title}” salva`, { tone: "success" });
+        try {
+          const saved = await savePalette(palette, targetBoards());
+          state.focusedId = saved.id;
+          renderRail(); renderGrid();
+          toast(`${palette.length === 1 ? "Cor" : "Paleta"} “${saved.title}” salva`, { tone: "success" });
+        } catch {
+          toast("Não consegui salvar essa paleta", { tone: "error" });
+        }
         return;
       }
 
-      const looksLikeUrl = /^https?:\/\//i.test(trimmed) ||
-        /^[\w-]+(\.[\w-]+)+([/?#].*)?$/.test(trimmed);
+      // "index.html" ou "Node.js" colados na página não viram link.
+      const looksLikeUrl = /^https?:\/\//i.test(trimmed) || looksLikeDomain(trimmed);
       if (!looksLikeUrl || /\s/.test(trimmed)) return;
 
       event.preventDefault();
