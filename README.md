@@ -129,9 +129,15 @@ também pode morar numa **pasta de verdade do computador**:
 ```
 A pasta que você escolher/
 ├─ acervo.json            o acervo agora — reescrito a cada alteração
-├─ acervo-anterior.json   o ponto de retorno — só muda quando você salva a cópia
-└─ imagens/<id>.webp      uma imagem por referência
+├─ acervo-anterior.json   a cópia que você salva no botão
+├─ historico/             uma versão por dia de uso, guardada sozinha (página publicada)
+└─ imagens/               uma imagem por referência
 ```
+
+Na página publicada, cada imagem tem **o nome que você deu a ela** no app
+(`imagens/Logo azul.webp`, `imagens/feeling (2).webp`), e renomear a
+referência renomeia o arquivo. No app completo o arquivo ainda se chama pelo
+id; os dois leem as pastas um do outro.
 
 Cada alteração é gravada nessa pasta na hora — não é um export, não tem botão
 pra lembrar de apertar — e na abertura seguinte é dela que o acervo volta se o
@@ -149,18 +155,18 @@ servidor, quem grava é o próprio navegador: no rodapé da barra lateral, **ond
 acervo é salvo → Escolher a pasta** (Chrome, Edge e outros Chromium). O formato é
 o mesmo dos dois lados, então a mesma pasta abre nas duas versões.
 
-**O ponto de retorno é seu.** `acervo.json` é um espelho em tempo real, então
-uma exclusão chega nele em um segundo. Por isso existe o segundo arquivo:
-`acervo-anterior.json` é a cópia que **você** salva no botão, e nenhuma
-gravação automática encosta nela — nem uma exclusão em massa, nem um "Limpar
-acervo". Ela fica congelada até você salvar outra, e as imagens que ela cita
-não são apagadas da pasta. A primeira cópia nasce sozinha quando você liga a
-pasta, pra não existir um só minuto sem rede.
+**Versões guardadas.** `acervo.json` é um espelho em tempo real, então uma
+exclusão chega nele em um segundo. Por isso a página publicada guarda versões
+sozinha: na primeira alteração de cada dia, a versão com que o acervo fechou o
+último dia de uso vai para `historico/` (as 30 últimas), e "Limpar acervo"
+deixa uma lá antes de apagar. `acervo-anterior.json` continua sendo a cópia que
+**você** salva no botão, quando quiser. As imagens que qualquer versão cita
+ficam na pasta, mesmo depois de apagadas do acervo.
 
-Salvar e restaurar ficam no mesmo lugar: **Ajustes → Salvo em disco** no app
-completo, rodapé da barra lateral → **Ponto de retorno** na página publicada.
-Restaurar **soma** ao acervo de agora, então o que veio depois da cópia não se
-perde.
+Restaurar fica no rodapé da barra lateral → **Versões guardadas** na página
+publicada (no app completo, **Ajustes → Salvo em disco**, só a cópia manual).
+Restaurar **soma** ao acervo de agora: em cada referência fica a versão editada
+por último, e o que veio depois não se perde.
 
 A pasta **não tem senha**: quem alcança o app alcança o acervo. Por isso ela vem
 desligada em produção — ligue com `VAULT_DIR` só onde o disco for persistente e
@@ -178,8 +184,12 @@ import soma ao que já existe e usa o mesmo id, então reimportar o mesmo arquiv
 não duplica nada.
 
 A diferença aparece só nas imagens: no backup elas vêm embutidas, no
-`acervo.json` são arquivos vizinhos. Importando o JSON sozinho, o app avisa
-quantas capas ficaram para trás — apontar a pasta inteira traz tudo junto.
+`acervo.json` são arquivos vizinhos. Por isso a página publicada tem
+**Ajustes → Importar pasta**: escolhida a pasta do acervo, o `acervo.json` e as
+imagens entram juntos, e se houver mais de uma versão (a cópia manual, o
+histórico) ela pergunta qual. Importando o JSON sozinho, as referências entram
+com a imagem pendente — escolher a pasta (ou arrastar os arquivos de
+`imagens/`) completa cada uma no lugar, em vez de criar outra.
 
 A rota `/api/metadata` é o que busca o `<head>` do link colado pra montar o
 card. Ela roda no servidor porque o navegador não consegue ler HTML de outro

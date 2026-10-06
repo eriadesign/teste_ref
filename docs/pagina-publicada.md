@@ -51,7 +51,9 @@ disponível em Chrome, Edge e outros Chromium):
 ```
 A pasta que você escolher/
 ├─ acervo.json
-└─ imagens/<id>.webp
+├─ acervo-anterior.json      a cópia que você salva no botão
+├─ historico/                uma versão por dia de uso, guardada sozinha
+└─ imagens/<título>.webp     cada imagem com o nome que você deu
 ```
 
 Cada alteração é gravada nela na hora, e na abertura seguinte a página lê de

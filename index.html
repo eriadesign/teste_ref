@@ -288,6 +288,30 @@
   .vault-state b { display: block; font-size: 13px; font-weight: 600; }
   .vault-state span:not(.dot) { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
 
+  .versions {
+    display: flex; flex-direction: column; margin-top: 12px;
+    border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+  }
+  .version {
+    display: flex; align-items: center; gap: 12px;
+    width: 100%; padding: 10px 12px; text-align: left;
+    background: var(--surface); color: var(--text);
+  }
+  .version + .version { border-top: 1px solid var(--border); }
+  .version b { display: block; font-size: 12.5px; font-weight: 600; }
+  .version span:not(.ico) { display: block; font-size: 11.5px; color: var(--text-faint); margin-top: 2px; overflow-wrap: anywhere; }
+  .version .btn { flex: none; }
+  .version-choice { cursor: pointer; transition: background 0.12s; }
+  .version-choice:hover, .version-choice:focus-visible { background: var(--surface-hover); }
+  .version-choice .ico { color: var(--text-faint); flex: none; }
+
+  .missing-image {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 10px;
+    padding: 14px; border-radius: 12px;
+    border: 1px dashed var(--border); background: var(--bg-sunken);
+  }
+  .missing-image p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
+
   /* ── área principal ─────────────────────────────────────────────── */
 
   .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -489,6 +513,8 @@
   .cover { position: relative; overflow: hidden; background: var(--bg-sunken); }
   .cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
   .cover-fallback { display: grid; place-items: center; }
+  .cover-missing { align-content: center; gap: 6px; background: var(--bg-sunken); }
+  .cover-missing-label { font-size: 11px; color: var(--text-faint); }
 
   /* paleta: as próprias cores são a capa */
   .cover-palette { display: flex; }
@@ -1640,8 +1666,10 @@
    * próprio navegador (File System Access API):
    *
    *   A pasta que você escolher/
-   *   ├─ acervo.json          boards, referências e preferências
-   *   └─ imagens/<id>.webp    uma imagem por referência
+   *   ├─ acervo.json              o acervo agora, regravado a cada alteração
+   *   ├─ acervo-anterior.json     a cópia que você salva no botão
+   *   ├─ historico/               uma versão por dia de uso, guardada sozinha
+   *   └─ imagens/<título>.webp    uma imagem por referência, com o nome dela
    *
    * Não é export nem backup: a pasta é regravada sozinha a cada alteração e
    * relida na abertura seguinte. É o que faz o acervo sobreviver a limpar os
@@ -1656,12 +1684,21 @@
    *
    * `acervo.json` acompanha o acervo em tempo real, com tudo que isso implica:
    * uma exclusão chega nele em um segundo. Este aqui é o ponto de retorno que
-   * você escolheu, e fica congelado até você escolher outro. Nenhuma gravação
-   * automática o toca — nem uma limpeza, nem uma exclusão em massa.
+   * você escolheu, e fica congelado até você escolher outro.
    */
   const VAULT_RESCUE = "acervo-anterior.json";
+  /**
+   * As versões que ninguém precisa lembrar de salvar. Na primeira gravação de
+   * cada dia, a versão com que o acervo fechou o último dia de uso vem pra cá
+   * antes de ser sobrescrita; "Limpar acervo" deixa uma aqui também. A cópia
+   * manual sozinha não bastava: ela só guarda o que alguém lembrou de salvar.
+   */
+  const VAULT_HISTORY = "historico";
+  const HISTORY_KEEP = 30;
   const VAULT_IMAGES = "imagens";
   const VAULT_FORMAT = "referencias/acervo";
+  const IMAGE_EXTS = [".webp", ".png", ".jpg", ".jpeg", ".gif", ".svg"];
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   const vault = {
     dir: null,
@@ -1675,10 +1712,126 @@
     persisted: false,
     /** Resumo da cópia salva: { items, boards, savedAt }. */
     rescue: null,
+    /** De quem é cada arquivo de imagens/: id da referência → nome do arquivo. */
+    index: new Map(),
+    /** Referências citadas por alguma versão guardada: id → { title, image }. `null` = reler. */
+    kept: null,
+    /** As versões guardadas na pasta, a cópia manual primeiro e depois da mais nova pra mais antiga. */
+    versions: [],
+    /** O dia (AAAA-MM-DD) cuja versão anterior já foi conferida nesta sessão. */
+    historyDay: "",
   };
 
   const vaultSupported = () => vault.status !== "unsupported";
   const vaultOn = () => Boolean(vault.dir);
+
+  function resetVaultMemory() {
+    vault.index = new Map();
+    vault.kept = null;
+    vault.versions = [];
+    vault.historyDay = "";
+    vault.rescue = null;
+  }
+
+  /* ── nomes ───────────────────────────────────────────────────────── */
+
+  const lower = (name) => String(name || "").toLowerCase();
+  const baseName = (path) => String(path || "").split("/").pop();
+  const stemOf = (name) => String(name || "").replace(/\.[^.]+$/, "");
+  const extOf = (name) => { const match = /\.[a-z0-9]+$/i.exec(name || ""); return match ? match[0].toLowerCase() : ""; };
+
+  const localDay = (ts) => {
+    const date = new Date(ts);
+    return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0")
+      + "-" + String(date.getDate()).padStart(2, "0");
+  };
+
+  const UNNAMED_IMAGE = "Imagem sem nome";
+
+  /**
+   * Nome que veio de máquina, não de gente: o hash que o Pinterest dá aos
+   * arquivos, o id com que o app nomeava as imagens na pasta, o "image.png" de
+   * um print colado. Nada disso diz o que a imagem é.
+   */
+  function isMachineName(raw) {
+    const name = String(raw || "").trim();
+    if (!name) return true;
+    return /^[0-9a-f]{16,}$/i.test(name)
+      || /^[0-9a-f]{8}[\s_-][0-9a-f]{4}[\s_-][0-9a-f]{4}[\s_-][0-9a-f]{4}[\s_-][0-9a-f]{12}$/i.test(name)
+      || /^\d{8,}$/.test(name)
+      || /^(image|imagem|img|unnamed|untitled|download|sem t[ií]tulo)(\s*\(\d+\))?$/i.test(name);
+  }
+
+  /** O título de uma imagem nova: o nome do arquivo, quando ele diz alguma coisa. */
+  function imageTitleFromFile(file) {
+    const name = stemOf(file.name || "").replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+    return isMachineName(name) ? UNNAMED_IMAGE : name;
+  }
+
+  /** O título como nome de arquivo que Windows, macOS e as nuvens aceitam. */
+  function fileBaseFor(title) {
+    let base = String(title || "").normalize("NFC")
+      .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]+/g, " ")
+      .replace(/\s+/g, " ").trim()
+      .replace(/^[.\s]+/, "").replace(/[.\s]+$/, "");
+    if (isMachineName(base)) base = UNNAMED_IMAGE;
+    const chars = [...base];
+    if (chars.length > 80) base = chars.slice(0, 80).join("").replace(/[.\s]+$/, "");
+    // Nomes que o Windows reserva pra dispositivos, com ou sem extensão.
+    if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(base)) base += " (imagem)";
+    return base || UNNAMED_IMAGE;
+  }
+
+  function imageExt(blob) {
+    const type = (blob && blob.type) || "";
+    return type === "image/png" ? ".png" : type === "image/jpeg" ? ".jpg"
+      : type === "image/gif" ? ".gif" : type === "image/svg+xml" ? ".svg" : ".webp";
+  }
+
+  /** "Logo.webp" e "Logo (3).webp" combinam com o título "Logo". */
+  function fitsName(name, base, ext) {
+    const full = lower(name), wanted = lower(base), suffix = lower(ext);
+    if (!full.endsWith(suffix)) return false;
+    const stem = full.slice(0, full.length - suffix.length);
+    if (stem === wanted) return true;
+    const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp("^" + escaped + " \\(\\d+\\)$").test(stem);
+  }
+
+  /**
+   * Um nome de arquivo pra cada imagem, a partir do título. Quem já tem um
+   * nome que combina com o título fica com ele — apagar ou renomear uma
+   * referência não sai renomeando as irmãs. Nome ocupado por arquivo de outra
+   * referência (ou por algo que alguém pôs na pasta) nunca é reaproveitado:
+   * sobrescrevê-lo seria trocar a imagem de outra pessoa.
+   */
+  function assignImageNames(entries, onDisk, owner) {
+    const names = new Map();
+    const used = new Set();
+    const free = (name, id) => !used.has(lower(name))
+      && (!onDisk.has(lower(name)) || owner.get(lower(name)) === id);
+
+    for (const entry of entries) {
+      const base = fileBaseFor(entry.title);
+      if (entry.current && fitsName(entry.current, base, entry.ext) && free(entry.current, entry.id)) {
+        names.set(entry.id, entry.current);
+        used.add(lower(entry.current));
+      }
+    }
+
+    // O restante por ordem de chegada: a imagem mais antiga fica com o nome
+    // sem número, as seguintes ganham (2), (3)…
+    const pending = entries.filter((entry) => !names.has(entry.id))
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    for (const entry of pending) {
+      const base = fileBaseFor(entry.title);
+      let name = base + entry.ext;
+      for (let n = 2; !free(name, entry.id); n++) name = `${base} (${n})${entry.ext}`;
+      names.set(entry.id, name);
+      used.add(lower(name));
+    }
+    return names;
+  }
 
   /* ── permissão ───────────────────────────────────────────────────── */
 
@@ -1696,32 +1849,119 @@
 
   /* ── leitura ─────────────────────────────────────────────────────── */
 
-  async function readVaultSnapshot(name = VAULT_FILE) {
-    const handle = await vault.dir.getFileHandle(name).catch(() => null);
+  const isLibraryFile = (parsed) => Boolean(parsed
+    && (parsed.format === VAULT_FORMAT || parsed.format === "referencias/backup")
+    && Array.isArray(parsed.items));
+
+  async function vaultFileHandle(path) {
+    const parts = String(path).split("/").filter(Boolean);
+    let dir = vault.dir;
+    while (parts.length > 1) dir = await dir.getDirectoryHandle(parts.shift());
+    return dir.getFileHandle(parts[0]);
+  }
+
+  async function readVaultSnapshot(path = VAULT_FILE) {
+    const handle = await vaultFileHandle(path).catch(() => null);
     if (!handle) return null;
     const file = await handle.getFile();
     if (!file.size) return null;
 
     let parsed;
     try { parsed = JSON.parse(await file.text()); }
-    catch { throw new Error("O acervo.json dessa pasta está ilegível"); }
+    catch { throw new Error(`O ${baseName(path)} dessa pasta está ilegível`); }
 
-    const known = parsed && (parsed.format === VAULT_FORMAT || parsed.format === "referencias/backup");
-    if (!known || !Array.isArray(parsed.items)) {
-      throw new Error("Essa pasta já tem um acervo.json que não é de Referências");
+    if (!isLibraryFile(parsed)) {
+      throw new Error(`Essa pasta já tem um ${baseName(path)} que não é de Referências`);
     }
     return parsed;
   }
 
   async function readVaultImage(path) {
     try {
-      const parts = String(path).split("/").filter(Boolean);
-      let dir = vault.dir;
-      while (parts.length > 1) dir = await dir.getDirectoryHandle(parts.shift());
-      return await (await dir.getFileHandle(parts[0])).getFile();
+      const file = await (await vaultFileHandle(path)).getFile();
+      return file.size ? await inMemory(file) : null;
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Um arquivo lido do disco é só um apontamento pra ele: se o arquivo mudar
+   * de nome ou sair da pasta, a imagem quebra na tela e no banco. Copiar os
+   * bytes pra memória desliga a referência do arquivo de origem.
+   */
+  async function inMemory(blob) {
+    if (!(blob instanceof File)) return blob;
+    const type = blob.type || ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+      ".gif": "image/gif", ".svg": "image/svg+xml" })[extOf(blob.name)] || "image/webp";
+    return new Blob([await blob.arrayBuffer()], { type });
+  }
+
+  /** Quem é dono de cada imagem, segundo um acervo.json. */
+  function indexFromSnapshot(snapshot) {
+    const index = new Map();
+    for (const row of (snapshot && snapshot.items) || []) {
+      if (row && row.id && row.image) index.set(row.id, baseName(row.image));
+    }
+    for (const [id, path] of Object.entries((snapshot && snapshot.imagensGuardadas) || {})) {
+      if (!index.has(id)) index.set(id, baseName(path));
+    }
+    return index;
+  }
+
+  /**
+   * Onde procurar a imagem de uma referência, em ordem: o nome que ela tem
+   * hoje (o título pode ter mudado desde que a versão foi guardada), o caminho
+   * que o arquivo cita — se nenhuma outra referência for dona dele agora — e o
+   * nome antigo, que era o id.
+   */
+  function imageCandidates(raw, index) {
+    const paths = [];
+    const own = index.get(raw.id);
+    if (own) paths.push(VAULT_IMAGES + "/" + own);
+    if (raw.image) {
+      const name = lower(baseName(raw.image));
+      const taken = [...index].some(([id, file]) => id !== raw.id && lower(file) === name);
+      if (!taken) paths.push(raw.image);
+    }
+    for (const ext of IMAGE_EXTS) paths.push(VAULT_IMAGES + "/" + raw.id + ext);
+    return paths;
+  }
+
+  async function vaultImageFor(raw) {
+    if (!vaultOn() || !raw) return null;
+    for (const path of imageCandidates(raw, vault.index)) {
+      const file = await readVaultImage(path);
+      if (file) return file;
+    }
+    return null;
+  }
+
+  function imageRatioOf(blob) {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(blob);
+      const image = new Image();
+      image.onload = () => { URL.revokeObjectURL(url); resolve(image.width / image.height || 1); };
+      image.onerror = () => { URL.revokeObjectURL(url); resolve(undefined); };
+      image.src = url;
+    });
+  }
+
+  /**
+   * Devolve a imagem a uma referência que estava sem ela. Não conta como
+   * edição: o `updatedAt` fica, senão a referência passaria por cima de
+   * versões mais novas dela em outro lugar só por ter recuperado a capa.
+   */
+  async function attachImage(id, blob, { ratio } = {}) {
+    const index = state.items.findIndex((item) => item.id === id);
+    if (index === -1) return null;
+    const { image, ...rest } = state.items[index];
+    const next = Object.assign({}, rest, { imageBlob: await inMemory(blob) });
+    if (!next.imageRatio) next.imageRatio = ratio || await imageRatioOf(blob);
+    releaseCover(id);
+    state.items[index] = next;
+    await rawPut(S_ITEMS, next);
+    return next;
   }
 
   /**
@@ -1732,6 +1972,7 @@
   async function mergeFromVault({ force = false, settings = false } = {}) {
     const snapshot = await readVaultSnapshot();
     if (!snapshot) return 0;
+    vault.index = indexFromSnapshot(snapshot);
 
     // Se o arquivo ainda tem o carimbo da nossa última gravação, este
     // navegador já é a versão mais nova: não há o que trazer.
@@ -1761,10 +2002,11 @@
         favorite: Boolean(rest.favorite),
       });
 
-      const blob = image ? await readVaultImage(image)
-        : imageData ? await (await fetch(imageData)).blob() : null;
+      const blob = current && current.imageBlob ? current.imageBlob
+        : imageData ? await (await fetch(imageData)).blob()
+        : image ? await vaultImageFor(raw) : null;
       if (blob) item.imageBlob = blob;
-      else if (current && current.imageBlob) item.imageBlob = current.imageBlob;
+      else if (image) item.image = image;
 
       releaseCover(item.id);
       itemMap.set(item.id, item);
@@ -1822,6 +2064,115 @@
     }
   }
 
+  /* ── versões guardadas ───────────────────────────────────────────── */
+
+  /**
+   * Antes da primeira gravação de um dia novo, a versão com que o acervo
+   * fechou o último dia de uso vai pra historico/. Confere uma vez por dia por
+   * sessão; se a versão daquele dia já está lá, nada muda.
+   */
+  async function rotateHistory() {
+    const today = localDay(Date.now());
+    if (vault.historyDay === today) return;
+
+    const handle = await vault.dir.getFileHandle(VAULT_FILE).catch(() => null);
+    const file = handle && await handle.getFile();
+    if (file && file.size) {
+      const text = await file.text();
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { /* arquivo ilegível não vira versão */ }
+      const day = parsed && localDay(Date.parse(parsed.savedAt) || file.lastModified);
+      if (isLibraryFile(parsed) && parsed.items.length && day !== today) {
+        const history = await vault.dir.getDirectoryHandle(VAULT_HISTORY, { create: true });
+        const name = "acervo-" + day + ".json";
+        const exists = await history.getFileHandle(name).then(() => true, () => false);
+        if (!exists) {
+          await writeVaultFile(history, name, text);
+          await pruneHistory(history);
+          vault.kept = null;
+        }
+      }
+    }
+    vault.historyDay = today;
+  }
+
+  /** Guarda em historico/ o acervo.json de agora, com um rótulo. */
+  async function saveHistoryNow(label) {
+    if (!vaultOn() || !(await ensureVaultAccess())) return null;
+    const handle = await vault.dir.getFileHandle(VAULT_FILE).catch(() => null);
+    const file = handle && await handle.getFile();
+    if (!file || !file.size) return null;
+
+    const now = new Date();
+    const name = "acervo-" + localDay(now) + "-" + String(now.getHours()).padStart(2, "0")
+      + String(now.getMinutes()).padStart(2, "0") + (label ? "-" + label : "") + ".json";
+    const history = await vault.dir.getDirectoryHandle(VAULT_HISTORY, { create: true });
+    await writeVaultFile(history, name, await file.text());
+    await pruneHistory(history);
+    vault.kept = null;
+    return VAULT_HISTORY + "/" + name;
+  }
+
+  async function pruneHistory(history) {
+    const names = [];
+    for await (const entry of history.values()) {
+      if (entry.kind === "file" && /^acervo-.*\.json$/i.test(entry.name)) names.push(entry.name);
+    }
+    names.sort().reverse();
+    for (const name of names.slice(HISTORY_KEEP)) await history.removeEntry(name).catch(() => {});
+  }
+
+  /**
+   * Lê as versões guardadas — a cópia manual e o histórico — e anota quais
+   * referências elas citam. As imagens dessas referências ficam na pasta mesmo
+   * depois de apagadas do acervo: restaurar sem as capas seria restaurar pela
+   * metade.
+   */
+  async function loadKept() {
+    if (vault.kept) return vault.kept;
+    const kept = new Map();
+    const versions = [];
+
+    const take = (path, manual, snapshot) => {
+      if (!snapshot || !snapshot.items.length) return;
+      versions.push({
+        path, manual,
+        items: snapshot.items.length,
+        boards: (snapshot.boards || []).length,
+        savedAt: snapshot.savedAt || snapshot.exportedAt || "",
+      });
+      for (const row of snapshot.items) {
+        if (!row || !row.id || kept.has(row.id)) continue;
+        if (row.image || row.kind === "image") {
+          kept.set(row.id, { title: row.title, image: row.image ? baseName(row.image) : "", createdAt: row.createdAt });
+        }
+      }
+    };
+
+    const rescue = await readVaultSnapshot(VAULT_RESCUE).catch(() => null);
+    take(VAULT_RESCUE, true, rescue);
+    vault.rescue = rescue && rescue.items.length
+      ? { items: rescue.items.length, boards: (rescue.boards || []).length, savedAt: rescue.savedAt || "" }
+      : null;
+
+    const history = await vault.dir.getDirectoryHandle(VAULT_HISTORY).catch(() => null);
+    if (history) {
+      const names = [];
+      for await (const entry of history.values()) {
+        if (entry.kind === "file" && /\.json$/i.test(entry.name)) names.push(entry.name);
+      }
+      names.sort().reverse();
+      for (const name of names) {
+        const path = VAULT_HISTORY + "/" + name;
+        take(path, false, await readVaultSnapshot(path).catch(() => null));
+      }
+    }
+
+    vault.kept = kept;
+    vault.versions = versions;
+    return kept;
+  }
+
   /* ── gravação ────────────────────────────────────────────────────── */
 
   let vaultTimer = null;
@@ -1841,6 +2192,12 @@
     vaultTimer = setTimeout(() => { void writeVault(); }, delay);
   }
 
+  /** Grava agora, esperando a gravação em curso terminar em vez de pular. */
+  async function flushVault(options) {
+    for (let i = 0; vaultWriting && i < 200; i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    await writeVault(options);
+  }
+
   async function writeVault({ checkpoint = false } = {}) {
     if (!vaultOn() || vaultWriting) return;
     clearTimeout(vaultTimer);
@@ -1851,34 +2208,101 @@
     try {
       if (!(await ensureVaultAccess())) return;
 
+      await rotateHistory();
+      const kept = await loadKept();
+
       const imagesDir = await vault.dir.getDirectoryHandle(VAULT_IMAGES, { create: true });
-      const onDisk = new Set();
+      const onDisk = new Map();
       for await (const entry of imagesDir.values()) {
-        if (entry.kind === "file") onDisk.add(entry.name);
+        if (entry.kind === "file") onDisk.set(lower(entry.name), entry);
+      }
+      const exists = (name) => Boolean(name) && onDisk.has(lower(name));
+
+      // De quem é cada arquivo. Pastas gravadas antes do índice nomeavam a
+      // imagem pelo id da referência: é assim que elas entram nele.
+      const index = new Map([...vault.index].filter(([, name]) => exists(name)));
+      const owner = () => new Map([...index].map(([id, name]) => [lower(name), id]));
+      const known = new Set([...state.items.map((item) => item.id), ...kept.keys()]);
+      for (const entry of onDisk.values()) {
+        const id = stemOf(entry.name);
+        if (known.has(id) && !index.has(id)) index.set(id, entry.name);
+      }
+      let owners = owner();
+      for (const [id, info] of kept) {
+        if (index.has(id) || !exists(info.image) || owners.has(lower(info.image))) continue;
+        index.set(id, onDisk.get(lower(info.image)).name);
+        owners = owner();
       }
 
-      const keep = new Set();
+      // Referência sem imagem cujo arquivo está aqui — o import de um JSON
+      // sozinho, um navegador que perdeu a capa — volta inteira.
+      let healed = 0;
+      for (const item of state.items.slice()) {
+        if (item.imageBlob) continue;
+        let name = index.get(item.id);
+        const pending = item.image && baseName(item.image);
+        if (!name && pending && exists(pending) && !owners.has(lower(pending))) {
+          name = onDisk.get(lower(pending)).name;
+          index.set(item.id, name);
+          owners = owner();
+        }
+        if (!name) continue;
+        await attachImage(item.id, await onDisk.get(lower(name)).getFile());
+        healed += 1;
+      }
+
+      // O nome de cada arquivo é o título da referência — o nome que você deu.
+      const items = state.items.slice();
+      const entries = [];
+      for (const item of items) {
+        if (!item.imageBlob) continue;
+        entries.push({ id: item.id, title: item.title, ext: imageExt(item.imageBlob),
+          current: index.get(item.id), createdAt: item.createdAt, item });
+      }
+      const live = new Set(entries.map((entry) => entry.id));
+      for (const [id, info] of kept) {
+        if (live.has(id) || !index.has(id)) continue;
+        const current = index.get(id);
+        entries.push({ id, title: info.title, ext: extOf(current) || ".webp", current, createdAt: info.createdAt });
+      }
+      const names = assignImageNames(entries, onDisk, owners);
+
+      const renamed = new Set();
+      for (const entry of entries) {
+        const name = names.get(entry.id);
+        const same = entry.current && lower(entry.current) === lower(name);
+        if (same && exists(name)) continue;
+        if (entry.item) {
+          await writeVaultFile(imagesDir, name, entry.item.imageBlob);
+        } else {
+          // Imagem que só uma versão guardada cita: muda de nome pela própria pasta.
+          await writeVaultFile(imagesDir, name, await onDisk.get(lower(entry.current)).getFile());
+        }
+        if (entry.current && !same) renamed.add(lower(entry.current));
+      }
+
+      // Sai da pasta só o que é do app e ninguém mais cita: arquivo com dono no
+      // índice, nome antigo de um renomeado ou nome de id. O que alguém pôs na
+      // pasta à mão fica onde está.
+      const keepNames = new Set([...names.values()].map(lower));
+      for (const [name, entry] of onDisk) {
+        if (keepNames.has(name)) continue;
+        const stem = stemOf(entry.name);
+        const ours = owners.has(name) || renamed.has(name) || UUID_RE.test(stem) || stem.startsWith("seed-");
+        if (ours) await imagesDir.removeEntry(entry.name).catch(() => {});
+      }
+
       const rows = [];
-      for (const item of state.items) {
-        const { imageBlob, ...rest } = item;
-        if (!imageBlob) { rows.push(rest); continue; }
-        const name = vaultImageName(item);
-        keep.add(name);
-        // O nome vem do id e a imagem de uma referência não muda: se o arquivo
-        // já está lá, reescrever seria só gasto de disco.
-        if (!onDisk.has(name)) await writeVaultFile(imagesDir, name, imageBlob);
-        rows.push(Object.assign({}, rest, { image: VAULT_IMAGES + "/" + name }));
+      for (const item of items) {
+        const { imageBlob, image, ...rest } = item;
+        if (imageBlob && names.has(item.id)) rows.push(Object.assign({}, rest, { image: VAULT_IMAGES + "/" + names.get(item.id) }));
+        // Imagem ainda não encontrada: o caminho fica anotado pra ela poder voltar.
+        else if (image) rows.push(Object.assign({}, rest, { image }));
+        else rows.push(rest);
       }
-
-      // As imagens da cópia salva ficam, mesmo que nenhuma referência de agora
-      // aponte pra elas: restaurar sem as capas seria restaurar pela metade.
-      const guardada = await readRescue();
-      for (const item of (guardada && guardada.items) || []) {
-        if (item && item.image) keep.add(String(item.image).split("/").pop());
-      }
-
-      for (const name of onDisk) {
-        if (!keep.has(name)) await imagesDir.removeEntry(name).catch(() => {});
+      const guardadas = {};
+      for (const entry of entries) {
+        if (!entry.item) guardadas[entry.id] = VAULT_IMAGES + "/" + names.get(entry.id);
       }
 
       const stamp = new Date().toISOString();
@@ -1890,15 +2314,20 @@
         boards: state.boards,
         items: rows,
       };
+      // Imagens de referências apagadas que alguma versão guardada ainda cita.
+      if (Object.keys(guardadas).length) snapshot.imagensGuardadas = guardadas;
       await writeVaultFile(vault.dir, VAULT_FILE, JSON.stringify(snapshot, null, 2));
+      vault.index = new Map(names);
+      document.querySelectorAll("[data-image-file]").forEach((node) => {
+        const name = vault.index.get(node.dataset.imageFile);
+        if (name) node.textContent = VAULT_IMAGES + "/" + name;
+      });
 
-      // A cópia manual: o mesmo conteúdo, num arquivo que nada automático
-      // encosta. Na primeira vez ela nasce sozinha — criar o que não existe
-      // não é sobrescrever, e ficar sem ponto de retorno até alguém lembrar do
-      // botão seria pior.
-      if (checkpoint || (!guardada && rows.length)) {
+      // A cópia manual: o mesmo conteúdo, num arquivo que nada automático encosta.
+      if (checkpoint) {
         await writeVaultFile(vault.dir, VAULT_RESCUE, JSON.stringify(snapshot, null, 2));
         vault.rescue = { items: rows.length, boards: state.boards.length, savedAt: stamp };
+        vault.kept = null;
       }
 
       vault.stamp = stamp;
@@ -1907,6 +2336,12 @@
       vaultFailures = 0;
       await rememberVault();
       setVaultStatus("ready");
+
+      if (healed) {
+        renderGrid();
+        if (state.detailId) renderDetail();
+        toast(contar(healed, "imagem voltou", "imagens voltaram") + " da pasta para as referências", { tone: "success" });
+      }
     } catch (error) {
       console.error("Falha ao gravar a pasta do acervo", error);
       vault.error = (error && error.message) || String(error);
@@ -1922,47 +2357,74 @@
   }
 
   /**
-   * Escreve no acervo o que veio de um arquivo — do import ou da cópia de
-   * resgate. Soma ao que já existe e regrava por id, então trazer duas vezes
-   * não duplica nada.
+   * Escreve no acervo o que veio de um arquivo — do import, da pasta ou de
+   * uma versão guardada. Soma ao que já existe e, em cada id, vence a versão
+   * editada por último; trazer duas vezes não duplica nada. Uma referência
+   * daqui que esteja sem imagem ganha a do arquivo, mesmo sendo mais nova.
+   *
+   * `resolveImage(raw)` acha a imagem de uma referência que não a traz
+   * embutida — na pasta conectada, por padrão.
    */
-  async function applyImport(parsed) {
-    const boards = (parsed.boards || []).filter((b) => b && b.id && b.name);
+  async function applyImport(parsed, { resolveImage = vaultImageFor } = {}) {
+    const boardMap = new Map(state.boards.map((b) => [b.id, b]));
+    const boards = (parsed.boards || []).filter((b) => b && b.id && b.name
+      && (!boardMap.has(b.id) || (boardMap.get(b.id).updatedAt || 0) <= (b.updatedAt || 0)));
+
+    const itemMap = new Map(state.items.map((i) => [i.id, i]));
     const items = [];
     let semImagem = 0;
 
     for (const raw of parsed.items || []) {
       if (!raw || !raw.id) continue;
       const { imageData, image, ...rest } = raw;
+      const current = itemMap.get(raw.id);
+      const hasImage = Boolean(imageData || image);
+      const lacking = hasImage && !(current && current.imageBlob);
 
-      let imageBlob;
-      if (imageData) {
-        imageBlob = await (await fetch(imageData)).blob();
-      } else if (image) {
-        // As imagens do acervo.json são arquivos ao lado dele: só dá pra
-        // alcançá-las se a pasta estiver conectada.
-        imageBlob = (vaultOn() && await readVaultImage(image)) || undefined;
-        if (!imageBlob) semImagem++;
+      let blob = null;
+      if (lacking) {
+        blob = imageData ? await (await fetch(imageData)).blob() : await resolveImage(raw);
+        if (blob) blob = await inMemory(blob);
       }
 
-      items.push(Object.assign({}, rest, {
+      if (current && (current.updatedAt || 0) > (raw.updatedAt || 0)) {
+        // A daqui foi editada depois: fica como está, só ganha a imagem se faltava.
+        if (blob) {
+          const { image: _pendente, ...mine } = current;
+          items.push(Object.assign({}, mine, { imageBlob: blob,
+            imageRatio: mine.imageRatio || raw.imageRatio || await imageRatioOf(blob) }));
+        } else if (lacking) semImagem++;
+        continue;
+      }
+
+      const item = Object.assign({}, rest, {
         tags: Array.isArray(rest.tags) ? rest.tags : [],
         boardIds: Array.isArray(rest.boardIds) ? rest.boardIds : [],
-        imageBlob,
-      }));
+        favorite: Boolean(rest.favorite),
+      });
+      const imageBlob = blob || (current && current.imageBlob);
+      if (imageBlob) {
+        item.imageBlob = imageBlob;
+        if (!item.imageRatio) item.imageRatio = await imageRatioOf(imageBlob);
+      } else if (hasImage) {
+        // Fica anotado de onde a imagem viria: a pasta, quando aparecer, completa.
+        if (image) item.image = image;
+        semImagem++;
+      }
+      items.push(item);
     }
 
     if (items.length || boards.length) {
       await dbPutMany(S_BOARDS, boards);
       await dbPutMany(S_ITEMS, items);
 
-      const boardMap = new Map(state.boards.map((b) => [b.id, b]));
       boards.forEach((b) => boardMap.set(b.id, b));
-      const itemMap = new Map(state.items.map((i) => [i.id, i]));
       items.forEach((i) => { releaseCover(i.id); itemMap.set(i.id, i); });
 
       state.boards = [...boardMap.values()]; sortBoards();
       state.items = [...itemMap.values()];
+      // Chegou um acervo de verdade: os exemplos que você nunca tocou saem.
+      if (items.length) await dropSeedLeftovers(parsed);
       state.selection = { type: "todos" };
       renderRail(); renderHead(); renderGrid();
     }
@@ -1987,13 +2449,6 @@
     } catch {
       return null;
     }
-  }
-
-  function vaultImageName(item) {
-    const type = (item.imageBlob && item.imageBlob.type) || "";
-    const ext = type === "image/png" ? ".png" : type === "image/jpeg" ? ".jpg"
-      : type === "image/gif" ? ".gif" : type === "image/svg+xml" ? ".svg" : ".webp";
-    return item.id + ext;
   }
 
   /**
@@ -2034,11 +2489,15 @@
   }
 
   async function useVaultDir(dir) {
-    const previous = { dir: vault.dir, name: vault.name, stamp: vault.stamp };
+    const previous = {
+      dir: vault.dir, name: vault.name, stamp: vault.stamp,
+      index: vault.index, kept: vault.kept, versions: vault.versions, historyDay: vault.historyDay, rescue: vault.rescue,
+    };
     vault.dir = dir;
     vault.name = dir.name || "acervo";
     vault.stamp = "";
     vault.error = "";
+    resetVaultMemory();
     setVaultStatus("saving");
 
     let restored = 0;
@@ -2056,11 +2515,11 @@
 
     await rememberVault();
     await writeVault();
-    void readRescue();
     if (restored) { renderRail(); renderHead(); renderGrid(); }
     toast(restored
       ? `${restored} ${restored === 1 ? "referência recuperada" : "referências recuperadas"} da pasta`
       : `Acervo salvo em ${vault.name}/ a cada alteração`, { tone: "success" });
+    void tidyLibrary();
   }
 
   async function reconnectVault() {
@@ -2080,24 +2539,29 @@
     toast(`Salvando em ${vault.name}/ de novo`, { tone: "success" });
   }
 
-  /** Traz de volta a cópia anterior — o desfazer de uma limpeza. */
-  async function restoreRescue() {
-    const anterior = await readRescue();
-    if (!anterior) {
-      toast("Não há cópia anterior nessa pasta", { tone: "error" });
+  /** Traz de volta uma versão guardada na pasta — o desfazer de uma limpeza. */
+  async function restoreVersion(path) {
+    let snapshot = null;
+    try { snapshot = vaultOn() ? await readVaultSnapshot(path) : null; } catch { /* tratado abaixo */ }
+    if (!snapshot || !snapshot.items.length) {
+      toast("Essa versão não está mais na pasta", { tone: "error" });
       return;
     }
-    const { items, boards } = await applyImport(anterior);
+    const { items, boards, semImagem } = await applyImport(snapshot);
     toast("Restaurei " + contar(items, "referência", "referências")
-      + (boards ? " e " + contar(boards, "board", "boards") : "") + " da cópia anterior",
-      { tone: "success" });
+      + (boards ? " e " + contar(boards, "board", "boards") : "")
+      + (semImagem ? ` — ${contar(semImagem, "ficou sem a imagem", "ficaram sem a imagem")}` : ""),
+      { tone: semImagem ? "info" : "success" });
   }
+
+  const restoreRescue = () => restoreVersion(VAULT_RESCUE);
 
   async function forgetVault() {
     vault.dir = null;
     vault.name = "";
     vault.stamp = "";
     vault.error = "";
+    resetVaultMemory();
     setVaultStatus("off");
     try { await rawDelete(S_PREFS, VAULT_KEY); } catch (error) { /* nada a fazer */ }
     toast("Parei de salvar na pasta — o que já está lá continua lá");
@@ -2126,7 +2590,6 @@
 
     try {
       await mergeFromVault({ settings });
-      void readRescue();
       setVaultStatus("ready");
     } catch (error) {
       console.error("Falha ao ler a pasta do acervo", error);
@@ -2135,6 +2598,226 @@
       return;
     }
     scheduleVaultSave(600);
+  }
+
+  /* ── importar uma pasta e completar imagens ──────────────────────── */
+
+  /** O caminho do arquivo dentro da pasta escolhida, sem o nome dela. */
+  function relPath(file) {
+    const full = file.webkitRelativePath || file.name || "";
+    const parts = full.split("/").filter(Boolean);
+    return parts.length > 1 ? parts.slice(1).join("/") : parts.join("/");
+  }
+
+  /** Abre o seletor de pasta do sistema — funciona em qualquer navegador. */
+  function pickFolder() {
+    const input = el("input", { type: "file", multiple: true, webkitdirectory: true, hidden: true });
+    input.addEventListener("change", () => {
+      const files = [...(input.files || [])];
+      input.remove();
+      void importFolder(files);
+    });
+    document.body.append(input);
+    input.click();
+  }
+
+  function versionTitle(path, savedAt) {
+    const when = Date.parse(savedAt);
+    const date = Number.isFinite(when) ? formatDate(when) : "";
+    const name = baseName(path);
+    if (name === VAULT_FILE) return "O acervo mais recente" + (date ? ", de " + date : "");
+    if (name === VAULT_RESCUE) return "A cópia salva por você" + (date ? ", de " + date : "");
+    if (/antes-de-limpar/.test(name)) return "Antes de limpar o acervo" + (date ? ", em " + date : "");
+    const day = /acervo-(\d{4})-(\d{2})-(\d{2})/.exec(name);
+    if (day) return "Como estava no fim de " + formatDate(new Date(+day[1], +day[2] - 1, +day[3]).getTime());
+    return name;
+  }
+
+  /** Pergunta qual versão importar quando a pasta tem mais de uma. */
+  function chooseVersion(candidates) {
+    return new Promise((resolve) => {
+      let dismiss = null;
+      const list = el("div", { class: "versions" }, candidates.map((candidate) =>
+        el("button", { class: "version version-choice", onclick: () => { dismiss(); resolve(candidate); } }, [
+          el("div", { style: "flex:1;min-width:0" }, [
+            el("b", { text: versionTitle(candidate.rel, candidate.parsed.savedAt || candidate.parsed.exportedAt) }),
+            el("span", { text: candidate.rel + " · "
+              + contar(candidate.parsed.items.length, "referência", "referências")
+              + ((candidate.parsed.boards || []).length ? " · " + contar(candidate.parsed.boards.length, "board", "boards") : "") }),
+          ]),
+          svg(ICON.chevron, 14),
+        ])));
+      dismiss = modal({
+        title: "Qual versão importar?",
+        description: "A pasta tem mais de uma versão do acervo. As imagens vêm junto de qualquer uma delas.",
+        body: [list, el("p", { class: "fine", text: "O import soma ao acervo de agora: o que já existe aqui e é mais novo continua como está." })],
+        footer: [el("button", { class: "btn btn-ghost", text: "Cancelar", onclick: () => { dismiss(); resolve(null); } })],
+      });
+    });
+  }
+
+  /**
+   * Importa uma pasta do acervo inteira — acervo.json e as imagens ao lado —
+   * pelo seletor de pastas comum, sem precisar conectá-la. Escolhida só a
+   * pasta imagens/ (ou uma sem acervo dentro), completa as referências que
+   * estão sem capa.
+   */
+  async function importFolder(files) {
+    if (!files.length) return;
+    const byPath = new Map(files.map((file) => [lower(relPath(file)), file]));
+
+    const candidates = [];
+    for (const [rel, file] of byPath) {
+      if (!rel.endsWith(".json")) continue;
+      const isHistory = rel.startsWith(VAULT_HISTORY + "/") && rel.split("/").length === 2;
+      if (rel.includes("/") && !isHistory) continue;
+      try {
+        const parsed = JSON.parse(await file.text());
+        if (isLibraryFile(parsed) && parsed.items.length) candidates.push({ rel: relPath(file), parsed });
+      } catch { /* json que não é acervo fica de fora */ }
+    }
+
+    if (!candidates.length) {
+      const images = files.filter((file) => /^image\//.test(file.type));
+      const { matched, already } = await completeFromFiles(images);
+      if (matched) {
+        renderGrid();
+        toast(contar(matched, "imagem voltou", "imagens voltaram") + " para a referência de origem", { tone: "success" });
+      } else {
+        toast(already
+          ? "Essas imagens já estão no acervo"
+          : "Nessa pasta não há acervo.json nem imagens de referências que estejam sem capa", { tone: already ? "info" : "error" });
+      }
+      return;
+    }
+
+    const rank = (rel) => lower(rel) === VAULT_FILE ? 0 : lower(rel) === VAULT_RESCUE ? 1 : rel.startsWith(VAULT_HISTORY) ? 2 : 3;
+    candidates.sort((a, b) => rank(a.rel) - rank(b.rel) || (b.rel > a.rel ? 1 : b.rel < a.rel ? -1 : 0));
+    const chosen = candidates.length === 1 ? candidates[0] : await chooseVersion(candidates);
+    if (!chosen) return;
+
+    // Quem é dono de cada imagem hoje está no acervo.json; a versão escolhida
+    // pode citar nomes antigos, de antes de um título mudar.
+    const live = candidates.find((candidate) => lower(candidate.rel) === VAULT_FILE);
+    const index = new Map([...indexFromSnapshot(chosen.parsed), ...(live ? indexFromSnapshot(live.parsed) : [])]);
+    // Pelo caminho primeiro; pelo nome do arquivo quando a pasta escolhida
+    // não é a raiz do acervo (alguém escolheu a de cima, por exemplo).
+    const byName = new Map();
+    for (const file of files) {
+      if (/^image\//.test(file.type) && !byName.has(lower(file.name))) byName.set(lower(file.name), file);
+    }
+    const resolveImage = async (raw) => {
+      const paths = imageCandidates(raw, index);
+      for (const path of paths) {
+        const file = byPath.get(lower(path));
+        if (file) return file;
+      }
+      for (const path of paths) {
+        const file = byName.get(lower(baseName(path)));
+        if (file) return file;
+      }
+      return null;
+    };
+
+    reportImport(await applyImport(chosen.parsed, { resolveImage }));
+    void tidyLibrary();
+  }
+
+  function reportImport({ items, boards, semImagem }) {
+    const resumo = "Importei " + contar(items, "referência", "referências")
+      + (boards ? " e " + contar(boards, "board", "boards") : "");
+    if (semImagem) {
+      toast(`${resumo} — ${contar(semImagem, "ficou sem a imagem", "ficaram sem a imagem")}`, {
+        action: { label: "Escolher a pasta", run: pickFolder },
+      });
+    } else {
+      toast(resumo, { tone: "success" });
+    }
+  }
+
+  /**
+   * Imagens que já são de alguma referência — as de imagens/, arrastadas ou
+   * escolhidas de volta — completam a referência em vez de virar outra. O
+   * casamento é pelo nome do arquivo: o caminho que a referência anotou, o
+   * nome dela na pasta ou o id, que era o nome antigo. Devolve as que não são
+   * de ninguém, pra seguirem como imagens novas.
+   */
+  async function completeFromFiles(files) {
+    const missing = new Map();
+    const present = new Set();
+    for (const item of state.items) {
+      if (item.imageBlob) { present.add(lower(item.id)); continue; }
+      missing.set(lower(item.id), item);
+      if (item.image) missing.set(lower(baseName(item.image)), item);
+      if (vault.index.has(item.id)) missing.set(lower(vault.index.get(item.id)), item);
+    }
+
+    let matched = 0, already = 0;
+    const rest = [];
+    for (const file of files) {
+      const name = lower(file.name);
+      const item = missing.get(name) || missing.get(stemOf(name));
+      if (item && !item.imageBlob) {
+        await attachImage(item.id, file);
+        item.imageBlob = file;
+        matched++;
+      } else if (present.has(stemOf(name))) {
+        already++;
+      } else {
+        rest.push(file);
+      }
+    }
+    if (matched) scheduleVaultSave();
+    return { matched, already, rest };
+  }
+
+  /**
+   * Arruma o que versões antigas deixaram pra trás. Roda na abertura e depois
+   * de cada import; quando não há nada a arrumar, não faz nada.
+   *
+   * - Imagens da pasta arrastadas de volta viravam uma referência nova, com o
+   *   id da original no título, em vez de completar a original sem capa.
+   * - Títulos de máquina — o hash do Pinterest, o "image" de um print — viram
+   *   "Imagem sem nome": o título é o nome do arquivo na pasta, e um hash não
+   *   diz o que a imagem é.
+   */
+  async function tidyLibrary() {
+    const byId = new Map(state.items.map((item) => [item.id, item]));
+    const drop = new Set();
+    let joined = 0, renamed = 0;
+
+    for (const copy of state.items.slice()) {
+      if (copy.kind !== "image" || !copy.imageBlob) continue;
+      const ref = String(copy.title || "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+      if (!UUID_RE.test(ref) || ref === lower(copy.id)) continue;
+      const original = byId.get(ref) || state.items.find((item) => lower(item.id) === ref);
+      if (!original || drop.has(original.id)) continue;
+
+      if (!original.imageBlob) {
+        await attachImage(original.id, copy.imageBlob, { ratio: copy.imageRatio });
+      } else if (copy.createdAt !== copy.updatedAt) {
+        continue; // cópia que você já editou é sua: fica
+      }
+      const boardIds = [...new Set([...(original.boardIds || []), ...(copy.boardIds || [])])];
+      if (boardIds.length !== (original.boardIds || []).length) await updateItem(original.id, { boardIds });
+      drop.add(copy.id);
+      joined++;
+    }
+    for (const id of drop) await deleteItem(id);
+
+    for (const item of state.items.slice()) {
+      if (item.kind === "image" && isMachineName(item.title) && item.title !== UNNAMED_IMAGE) {
+        await updateItem(item.id, { title: UNNAMED_IMAGE });
+        renamed++;
+      }
+    }
+
+    if (!joined && !renamed) return;
+    renderRail(); renderHead(); renderGrid();
+    const parts = [];
+    if (joined) parts.push(contar(joined, "imagem em dobro voltou", "imagens em dobro voltaram") + " para a referência de origem");
+    if (renamed) parts.push(contar(renamed, "título de código virou", "títulos de código viraram") + ` “${UNNAMED_IMAGE}”`);
+    toast("Arrumei o acervo: " + parts.join(" · "), { tone: "success", duration: 9000 });
   }
 
   /* ── armazenamento persistente ───────────────────────────────────── */
@@ -2187,8 +2870,23 @@
 
   function openStorage() {
     let dismiss = null;
-    let anterior = null;
+    /** As versões guardadas na pasta; `null` enquanto são lidas. */
+    let versions = null;
     const body = el("div", { style: "display:flex;flex-direction:column;gap:20px" });
+
+    const loadVersions = async () => {
+      if (!vaultOn()) return;
+      try {
+        if (await ensureVaultAccess()) {
+          vault.kept = null;
+          await loadKept();
+        }
+      } catch (error) {
+        console.warn("Não consegui ler as versões da pasta", error);
+      }
+      versions = vault.versions.slice();
+      paint();
+    };
 
     const paint = () => {
       const on = vaultOn();
@@ -2215,33 +2913,40 @@
         ]),
       ]));
 
-      // O ponto de retorno: o que a pasta tem guardado e como voltar pra lá.
+      // As versões guardadas: o que a pasta tem e como voltar pra cada uma.
       if (on) {
-        const salvarCopia = el("button", { class: anterior ? "btn btn-ghost" : "btn btn-primary",
+        const salvarCopia = el("button", { class: "btn btn-ghost",
           onclick: async () => {
-            await writeVault({ checkpoint: true });
-            anterior = await readRescue();
-            paint();
+            await flushVault({ checkpoint: true });
+            await loadVersions();
             toast(vault.status === "ready"
               ? "Cópia salva em " + VAULT_RESCUE
               : "Não consegui salvar a cópia agora", { tone: vault.status === "ready" ? "success" : "error" });
-          } }, [svg(ICON.download, 14), anterior ? "Salvar cópia agora" : "Salvar a primeira cópia"]);
+          } }, [svg(ICON.download, 14), "Salvar uma cópia agora"]);
+
+        const list = versions === null
+          ? el("p", { class: "fine", text: "Lendo as versões da pasta…" })
+          : versions.length
+            ? el("div", { class: "versions" }, versions.map((version) =>
+                el("div", { class: "version" }, [
+                  el("div", { style: "flex:1;min-width:0" }, [
+                    el("b", { text: versionTitle(version.path, version.savedAt) }),
+                    el("span", { text: contar(version.items, "referência", "referências")
+                      + (version.boards ? " · " + contar(version.boards, "board", "boards") : "")
+                      + " · " + (version.manual ? "salva por você" : "guardada sozinha") }),
+                  ]),
+                  el("button", { class: "btn btn-ghost", onclick: async () => { dismiss(); await restoreVersion(version.path); } },
+                    [svg(ICON.upload, 14), "Restaurar"]),
+                ])))
+            : el("p", { class: "fine", text: "Ainda não há versão guardada. A primeira aparece sozinha no próximo dia em que você usar o acervo — ou agora, se você salvar uma cópia." });
 
         rows.push(el("section", { class: "section" }, [
-          el("h3", { text: "Ponto de retorno" }),
-          el("p", { text: anterior
-            ? `${VAULT_RESCUE} guarda ${contar(anterior.items.length, "referência", "referências")}`
-              + (anterior.savedAt ? `, de ${formatDate(Date.parse(anterior.savedAt))}` : "")
-              + ". Nenhuma gravação automática mexe nesse arquivo: ele só muda quando você salva outra cópia aqui."
-            : "A pasta ainda não tem uma cópia salva. Ela é o arquivo que nada automático toca — nem uma exclusão, nem uma limpeza." }),
-          el("div", { class: "row-actions" }, [
-            salvarCopia,
-            anterior
-              ? el("button", { class: "btn btn-primary", onclick: async () => { dismiss(); await restoreRescue(); } },
-                  [svg(ICON.upload, 14), "Restaurar " + contar(anterior.items.length, "referência", "referências")])
-              : null,
-          ]),
-          el("p", { class: "fine", text: "Restaurar soma ao acervo de agora, não substitui: o que você criou depois da cópia continua aí." }),
+          el("h3", { text: "Versões guardadas" }),
+          el("p", { text: "A cada dia de uso, a versão do dia anterior fica guardada em " + VAULT_HISTORY + "/, sozinha — as "
+            + HISTORY_KEEP + " últimas. Antes de limpar o acervo, também. E dá pra salvar uma cópia sua quando quiser, em " + VAULT_RESCUE + "." }),
+          list,
+          el("div", { class: "row-actions" }, [salvarCopia]),
+          el("p", { class: "fine", text: "Restaurar soma ao acervo de agora, não substitui: o que você criou ou editou depois da versão continua aí, e as imagens voltam junto." }),
         ]));
       }
 
@@ -2254,7 +2959,8 @@
           el("pre", { class: "snippet", text: (on ? vault.name : "Referências")
             + "/\n├─ acervo.json            o acervo agora, a cada alteração"
             + "\n├─ " + VAULT_RESCUE + "   a cópia que você salva no botão"
-            + "\n└─ imagens/               uma imagem por referência" }),
+            + "\n├─ " + VAULT_HISTORY + "/              uma versão por dia de uso, sozinha"
+            + "\n└─ imagens/               cada imagem com o nome que você deu" }),
           el("div", { class: "row-actions" }, [
             vault.status === "permission"
               ? el("button", { class: "btn btn-primary", onclick: async () => { dismiss(); await reconnectVault(); } },
@@ -2293,11 +2999,7 @@
     };
 
     paint();
-    void readRescue().then((snapshot) => {
-      if (!snapshot) return;
-      anterior = snapshot;
-      paint();
-    });
+    void loadVersions();
 
     dismiss = modal({
       title: "Onde o acervo é salvo",
@@ -2543,7 +3245,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     node.dataset.toastId = id;
     $("toasts").append(node);
     while ($("toasts").children.length > 3) $("toasts").firstElementChild.remove();
-    toastTimers.set(id, setTimeout(() => dismissToast(id), options.action ? 7000 : 3600));
+    toastTimers.set(id, setTimeout(() => dismissToast(id), options.duration || (options.action ? 7000 : 3600)));
     return id;
   }
 
@@ -2595,6 +3297,17 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
           text: (hostOf(item.url) || item.title || "?").charAt(0).toUpperCase(),
         }));
       }
+      return box;
+    }
+
+    // Imagem cuja foto não veio junto (um import de JSON sem a pasta): em vez
+    // do título em letras grandes, um aviso de que falta o arquivo.
+    if (item.kind === "image") {
+      if (aspect === "auto") box.style.aspectRatio = "4 / 3";
+      box.classList.add("cover-missing");
+      const icon = svg(ICON.image, 22);
+      icon.style.color = "var(--text-faint)";
+      box.append(icon, el("span", { class: "cover-missing-label", text: "imagem não encontrada" }));
       return box;
     }
 
@@ -3033,6 +3746,31 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     renderDetail();
   }
 
+  /** No painel de uma imagem que não veio junto: como trazê-la de volta. */
+  function missingImageBox(item) {
+    const picker = el("input", { type: "file", accept: "image/*", hidden: true });
+    picker.addEventListener("change", async () => {
+      const file = picker.files && picker.files[0];
+      if (!file) return;
+      const isVector = file.type === "image/svg+xml";
+      const { blob, ratio } = isVector ? { blob: file, ratio: 1 } : await compressImage(file);
+      await attachImage(item.id, blob, { ratio });
+      scheduleVaultSave();
+      renderGrid(); renderDetail();
+      toast("Imagem de volta na referência", { tone: "success" });
+    });
+    return el("div", { class: "missing-image", style: "margin:16px 20px 0" }, [
+      el("p", { text: "A imagem desta referência não veio junto"
+        + (item.image ? ` — na pasta ela se chamava ${baseName(item.image)}` : "")
+        + ". Escolha o arquivo, ou a pasta do acervo inteira, e ela volta pra cá." }),
+      el("div", { class: "row-actions", style: "margin-top:0" }, [
+        el("button", { class: "btn btn-primary", onclick: () => picker.click() }, [svg(ICON.upload, 14), "Escolher o arquivo"]),
+        el("button", { class: "btn btn-ghost", onclick: () => pickFolder() }, [svg(ICON.folder, 14), "Escolher a pasta"]),
+        picker,
+      ]),
+    ]);
+  }
+
   function closeDetail() {
     state.detailId = null;
     if (detailClose) { detailClose(); detailClose = null; }
@@ -3082,6 +3820,8 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       const box = cover(item, { aspect: "auto" });
       box.classList.add("drawer-cover");
       body.append(box);
+    } else if (item.kind === "image") {
+      body.append(missingImageBox(item));
     }
 
     const content = el("div", { class: "drawer-content" });
@@ -3106,6 +3846,12 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     const host = hostOf(item.url);
     if (host) meta.append(el("span", { class: "host", text: host }), el("span", { text: "·" }));
     meta.append(el("span", { text: "Salvo em " + formatDate(item.createdAt) }));
+    if (item.imageBlob && vaultOn() && vault.index.has(item.id)) {
+      // O arquivo segue o título: renomeou aqui, renomeia na pasta.
+      meta.append(el("span", { text: "·" }),
+        el("span", { class: "host", title: "O arquivo na pasta do acervo — muda junto com o título",
+          dataset: { imageFile: item.id }, text: VAULT_IMAGES + "/" + vault.index.get(item.id) }));
+    }
 
     content.append(el("div", {}, [titleField, meta]));
 
@@ -3571,6 +4317,13 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       [svg(ICON.download, 14), "Exportar tudo"]);
     const fileInput = el("input", { type: "file", accept: "application/json,.json", hidden: true });
     fileInput.addEventListener("change", () => doImport(fileInput.files[0]));
+    const folderInput = el("input", { type: "file", multiple: true, webkitdirectory: true, hidden: true });
+    folderInput.addEventListener("change", async () => {
+      const files = [...(folderInput.files || [])];
+      folderInput.value = "";
+      if (files.length) dismiss();
+      await importFolder(files);
+    });
 
     async function doExport() {
       const payload = {
@@ -3635,16 +4388,10 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
           return;
         }
 
-        const resumo = "Importei " + contar(items, "referência", "referências")
-          + (boards ? " e " + contar(boards, "board", "boards") : "");
-        if (semImagem) {
-          // A pasta inteira traz as capas junto; o JSON sozinho, não.
-          toast(`${resumo} — ${semImagem} sem a capa`, {
-            action: { label: "Abrir a pasta", run: () => { dismiss(); void pickVault(); } },
-          });
-        } else {
-          toast(resumo, { tone: "success" });
-        }
+        // O JSON sozinho não traz as imagens da pasta: o aviso oferece
+        // escolher a pasta, e elas completam as referências que ficaram sem.
+        reportImport({ items, boards, semImagem });
+        void tidyLibrary();
       } catch (error) {
         toast(error.message || "Arquivo inválido", { tone: "error" });
       } finally {
@@ -3686,23 +4433,24 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
         ]),
 
         el("section", { class: "section" }, [
-          el("h3", { text: "Cópia em arquivo" }),
-          el("p", { text: "Um único .json com tudo dentro, pra guardar onde você quiser ou levar pra outra máquina — inclusive as imagens. O import também aceita o acervo.json da pasta." }),
+          el("h3", { text: "Cópia e importação" }),
+          el("p", { text: "Exportar gera um único .json com tudo dentro, inclusive as imagens, pra guardar onde você quiser ou levar pra outra máquina." }),
+          el("p", { text: "Pra trazer de volta um acervo da pasta, importe a pasta inteira: o acervo.json e as imagens vêm juntos, e se houver mais de uma versão (a cópia que você salvou, o histórico) você escolhe qual." }),
           el("div", { class: "row-actions" }, [
-            exportButton, fileInput,
+            exportButton, fileInput, folderInput,
+            el("button", { class: "btn btn-ghost", onclick: () => folderInput.click() },
+              [svg(ICON.folder, 14), "Importar pasta"]),
             el("button", { class: "btn btn-ghost", onclick: () => fileInput.click() },
               [svg(ICON.upload, 14), "Importar arquivo"]),
           ]),
-          el("p", { class: "fine", text: "O import soma ao que já existe. Reimportar o mesmo arquivo não duplica nada. Pra trazer as imagens junto com o acervo.json, escolha a pasta inteira em vez do arquivo." }),
+          el("p", { class: "fine", text: "O import soma ao que já existe e, em cada referência, fica a versão editada por último — reimportar não duplica nada. Importando só um .json da pasta, as imagens ficam pendentes até você escolher a pasta. O navegador pode perguntar se quer \"enviar\" os arquivos: nada sai do seu computador, a página só lê." }),
         ]),
 
         el("section", { class: "section" }, [
           el("h3", { text: "Zona de risco" }),
           el("p", { text: !vaultOn()
             ? "Apaga todas as referências e boards deste navegador. Não dá pra desfazer — e, sem uma pasta configurada, não há cópia nenhuma."
-            : vault.rescue
-              ? "Apaga todas as referências e boards, e esvazia o acervo.json junto — ele é um espelho em tempo real. O que sobrevive é a cópia salva em " + VAULT_RESCUE + " (" + contar(vault.rescue.items, "referência", "referências") + "), que dá pra restaurar em Salvamento."
-              : "Apaga todas as referências e boards, e esvazia o acervo.json junto. A pasta ainda não tem cópia salva: salve uma em Salvamento antes, ou não haverá volta." }),
+            : "Apaga todas as referências e boards, e esvazia o acervo.json junto — ele é um espelho em tempo real. Antes, o acervo de agora fica guardado em " + VAULT_HISTORY + "/, com as imagens, e dá pra restaurar em Salvamento." }),
           el("div", { class: "row-actions" }, [
             el("button", { class: "btn btn-danger", text: "Limpar acervo", onclick: async (event) => {
               if (!confirming) {
@@ -3710,13 +4458,23 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
                 event.currentTarget.textContent = `Confirmar: apagar ${state.items.length} itens`;
                 return;
               }
+              // O acervo de agora vai pro histórico antes de sumir do espelho.
+              let guardada = null;
+              if (vaultOn()) {
+                await flushVault();
+                guardada = await saveHistoryNow("antes-de-limpar").catch(() => null);
+                if (!guardada && state.items.length) {
+                  toast("Não consegui guardar uma versão antes de limpar — nada foi apagado", { tone: "error" });
+                  return;
+                }
+              }
               state.items.forEach((item) => releaseCover(item.id));
               await Promise.all([dbClear(S_ITEMS), dbClear(S_BOARDS)]);
               state.items = []; state.boards = []; state.selection = { type: "todos" };
               dismiss(); renderRail(); renderHead(); renderGrid();
-              if (vaultOn() && vault.rescue) {
-                toast(`Acervo limpo — a cópia salva em ${VAULT_RESCUE} continua intacta`, {
-                  action: { label: "Restaurar", run: () => { void restoreRescue(); } },
+              if (guardada) {
+                toast(`Acervo limpo — a versão de antes ficou em ${VAULT_HISTORY}/`, {
+                  action: { label: "Desfazer", run: () => { void restoreVersion(guardada); } },
                 });
               } else {
                 toast("Acervo limpo", { tone: "success" });
@@ -3737,7 +4495,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
         el("section", { class: "section" }, [
           el("h3", { text: "Onde ficam os seus dados" }),
           el("p", { text: "Tudo que você salvar fica no IndexedDB deste navegador, incluindo as imagens — e nada é enviado para lugar nenhum. Só que navegador esquece: limpar os dados do site apaga o acervo." }),
-          el("p", { text: "Por isso dá pra apontar uma pasta do computador. A partir daí cada alteração é gravada nela em acervo.json (mais uma imagem por referência), e a página lê de lá quando abre. Não é um export que você precisa lembrar de fazer: é o acervo morando em disco." }),
+          el("p", { text: "Por isso dá pra apontar uma pasta do computador. A partir daí cada alteração é gravada nela em acervo.json, com cada imagem num arquivo com o nome que você deu a ela, e a página lê de lá quando abre. Uma versão por dia de uso fica guardada sozinha em historico/. Não é um export que você precisa lembrar de fazer: é o acervo morando em disco." }),
           el("div", { class: "row-actions" }, [
             el("button", { class: "btn btn-ghost", onclick: () => { dismissAbout(); openStorage(); } },
               [svg(ICON.folder, 14), "Onde o acervo é salvo"]),
@@ -3899,18 +4657,18 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     });
   }
 
-  async function saveImages(files, boardIds) {
-    const images = files.filter((file) => /^image\//.test(file.type));
-    if (!images.length) throw new Error("Nenhuma imagem reconhecida no arquivo");
-
+  async function saveImages(images, boardIds) {
     const drafts = [];
     for (const file of images) {
       const isVector = file.type === "image/svg+xml";
       const { blob, ratio } = isVector ? { blob: file, ratio: 1 } : await compressImage(file);
-      const title = (file.name || "").replace(/\.\w+$/, "").replace(/[-_]+/g, " ").trim();
+      // O título é o nome que a imagem vai ter na pasta: hash e "image.png"
+      // viram "Imagem sem nome", pra você dar o nome de verdade.
+      const title = imageTitleFromFile(file);
       drafts.push({
-        kind: "image", title: title || "Imagem sem nome",
-        imageBlob: blob, imageRatio: ratio, boardIds, tags: suggestTags({ title }, 3),
+        kind: "image", title,
+        imageBlob: blob, imageRatio: ratio, boardIds,
+        tags: title === UNNAMED_IMAGE ? [] : suggestTags({ title }, 3),
       });
     }
     return createItems(drafts);
@@ -3961,10 +4719,21 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
   async function handleFiles(files) {
     try {
-      const saved = await saveImages([...files], targetBoards());
-      state.focusedId = saved[0].id;
+      const images = [...files].filter((file) => /^image\//.test(file.type));
+      if (!images.length) throw new Error("Nenhuma imagem reconhecida no arquivo");
+
+      // Imagem que já é de uma referência (a da pasta imagens/, arrastada de
+      // volta) completa a referência em vez de virar uma nova.
+      const { matched, already, rest } = await completeFromFiles(images);
+      const saved = rest.length ? await saveImages(rest, targetBoards()) : [];
+      if (saved.length) state.focusedId = saved[0].id;
       renderRail(); renderGrid();
-      toast(saved.length > 1 ? `${saved.length} imagens salvas` : "Imagem salva", { tone: "success" });
+
+      const parts = [];
+      if (saved.length) parts.push(saved.length > 1 ? `${saved.length} imagens salvas` : "Imagem salva");
+      if (matched) parts.push(contar(matched, "voltou para a referência de origem", "voltaram para as referências de origem"));
+      if (already) parts.push(contar(already, "já estava no acervo", "já estavam no acervo"));
+      toast(parts.join(" · "), { tone: saved.length || matched ? "success" : "info" });
     } catch (error) {
       toast(error.message || "Não consegui salvar", { tone: "error" });
     }
@@ -4215,6 +4984,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
     state.ready = true;
     renderRail(); renderHead(); renderGrid();
+    void tidyLibrary();
   }
 
   function wire() {

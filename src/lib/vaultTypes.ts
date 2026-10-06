@@ -8,7 +8,11 @@ import type { Board, Item, Settings } from "./types";
  *
  *   <pasta>/
  *   ├─ acervo.json          boards, referências e preferências
- *   └─ imagens/<id>.webp    uma imagem por referência
+ *   └─ imagens/<nome>.webp  uma imagem por referência
+ *
+ * Quem lê não supõe o nome do arquivo: segue o `image` de cada referência.
+ * Este app grava pelo id; a página publicada grava pelo título e guarda ainda
+ * `historico/` e `imagensGuardadas` (imagens que só versões antigas citam).
  */
 
 export const VAULT_FILE = "acervo.json";
@@ -53,13 +57,17 @@ export function imageFileName(id: string, mime?: string): string {
 }
 
 /**
- * O nome vem de um id gerado no navegador. Sem uma peneira aqui, um id com
- * `../` faria o servidor escrever fora da pasta.
+ * O nome vem do cliente. Sem uma peneira aqui, um nome com `../` faria o
+ * servidor escrever fora da pasta.
+ *
+ * A página publicada nomeia as imagens pelo título da referência ("Logo
+ * azul (2).webp"), então espaço, acento e parênteses passam. Barra, os
+ * caracteres que o Windows recusa e nome começando com ponto, não: sem
+ * separador e sem ponto inicial, o nome nunca sai de `imagens/`.
  */
 export function isSafeImageName(name: string): boolean {
   return (
-    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name) &&
-    !name.includes("..") &&
+    /^[^.\s/\\<>:"|?*\u0000-\u001f][^/\\<>:"|?*\u0000-\u001f]{0,159}$/u.test(name) &&
     /\.(webp|png|jpg|jpeg|gif|svg)$/i.test(name)
   );
 }

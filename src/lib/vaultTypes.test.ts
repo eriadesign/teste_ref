@@ -18,13 +18,22 @@ test("aceita os nomes que o app gera", () => {
   assert.ok(isSafeImageName("a.jpeg"));
 });
 
+test("aceita os nomes que a página publicada dá pelo título", () => {
+  assert.ok(isSafeImageName("feeling.webp"));
+  assert.ok(isSafeImageName("Imagem sem nome (12).webp"));
+  assert.ok(isSafeImageName("Referência de menu — versão 2.png"));
+  assert.ok(isSafeImageName("Ideia... nova.webp"));
+});
+
 test("recusa nome que escaparia da pasta de imagens", () => {
   assert.equal(isSafeImageName("../acervo.json"), false);
   assert.equal(isSafeImageName("..%2Facervo.json"), false);
   assert.equal(isSafeImageName("sub/dir.webp"), false);
   assert.equal(isSafeImageName("/etc/passwd.png"), false);
   assert.equal(isSafeImageName(".oculto.webp"), false);
-  assert.equal(isSafeImageName("nome com espaço.webp"), false);
+  assert.equal(isSafeImageName("..\\acervo.webp"), false);
+  assert.equal(isSafeImageName("C:imagem.webp"), false);
+  assert.equal(isSafeImageName(" espaço na frente.webp"), false);
   assert.equal(isSafeImageName(""), false);
 });
 

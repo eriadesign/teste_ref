@@ -10,10 +10,19 @@ cada alteração é gravada na hora:
 
 ```
 A pasta que você escolher/
-├─ acervo.json            o acervo agora — reescrito a cada alteração
-├─ acervo-anterior.json   o ponto de retorno — só muda quando você salva a cópia
-└─ imagens/<id>.webp      uma imagem por referência
+├─ acervo.json              o acervo agora — reescrito a cada alteração
+├─ acervo-anterior.json     a cópia que você salva no botão
+├─ historico/               uma versão por dia de uso, guardada sozinha
+│  ├─ acervo-2026-09-22.json
+│  └─ acervo-2026-10-06-1530-antes-de-limpar.json
+└─ imagens/                 uma imagem por referência, com o nome que você deu
+   ├─ Logo azul.webp
+   └─ feeling (2).webp
 ```
+
+`historico/` e os nomes pelo título são da página publicada; o app completo
+ainda grava `imagens/<id>.webp` e só a cópia manual. Os dois leem a pasta um do
+outro, porque cada referência no `acervo.json` diz qual é o arquivo dela.
 
 Isso **não é um export**. Você não aperta nada, não escolhe um momento, não
 precisa lembrar: salvar uma referência é gravar na pasta. E na abertura
@@ -88,14 +97,26 @@ cima dele:
 - **O `acervo.json` é trocado por inteiro, nunca remendado.** A gravação vai
   primeiro num arquivo temporário e só então substitui o antigo: um travamento
   no meio não deixa o arquivo pela metade.
-- **Imagem se grava uma vez.** O nome do arquivo é o id da referência, então o
-  que já está na pasta não sobe de novo — e o que nenhuma referência aponta mais
-  é apagado, a não ser que a cópia anterior ainda aponte.
-- **A cópia é sua, não do app.** Nenhuma gravação automática escreve em
-  `acervo-anterior.json`: só o botão de salvar cópia. A única exceção é a
-  primeira, criada junto com a pasta — criar o que não existe não é
-  sobrescrever, e ficar sem ponto de retorno até alguém lembrar do botão seria
-  pior.
+- **A imagem tem o nome que você deu.** O arquivo se chama como o título da
+  referência; títulos iguais ganham `(2)`, `(3)`… Renomear a referência
+  renomeia o arquivo na gravação seguinte, e quem já tem um nome que combina com
+  o título fica com ele — apagar uma imagem não sai renomeando as irmãs. O
+  `acervo.json` anota qual arquivo é de qual referência, então um nome ocupado
+  por outra imagem (ou por algo que você pôs na pasta à mão) nunca é
+  sobrescrito, e arquivo que não é do app nunca é apagado.
+- **Nome de máquina vira "Imagem sem nome".** O hash que o Pinterest dá aos
+  arquivos, o `image.png` de um print colado: o título vira o nome do arquivo,
+  e esses não dizem o que a imagem é. É o convite pra você dar o nome.
+- **Imagem se grava uma vez.** O que já está na pasta com o nome certo não sobe
+  de novo. O que nenhuma referência cita mais sai da pasta — a não ser que
+  alguma versão guardada ainda cite: aí fica, e o `acervo.json` a lista em
+  `imagensGuardadas`.
+- **As versões não dependem de você.** Na primeira gravação de cada dia, a
+  versão com que o acervo fechou o último dia de uso vai pra `historico/` antes
+  de ser sobrescrita. Ficam as 30 últimas. "Limpar acervo" também deixa uma lá
+  antes de apagar — se não conseguir gravá-la, não apaga nada.
+- **A cópia manual é sua.** Nenhuma gravação automática escreve em
+  `acervo-anterior.json`: só o botão de salvar cópia.
 - **Na abertura, vence o mais recente.** Se a pasta tem uma versão mais nova de
   uma referência, ela entra; se este navegador tem, ele fica. Trazer de volta
   nunca desfaz uma edição recente.
@@ -118,48 +139,53 @@ sendo a cópia portátil, num arquivo só.
 
 ---
 
-## O ponto de retorno
+## Versões guardadas
 
-Os dois arquivos têm papéis opostos, e é isso que faz a coisa funcionar:
+Três arquivos, três papéis:
 
 | Arquivo | Quem escreve | Quando muda |
 | --- | --- | --- |
 | `acervo.json` | o app | a cada alteração, um segundo depois |
+| `historico/acervo-<dia>.json` | o app, sozinho | uma vez por dia de uso: guarda como o acervo fechou o dia anterior |
+| `historico/…-antes-de-limpar.json` | o app, sozinho | antes de "Limpar acervo" apagar qualquer coisa |
 | `acervo-anterior.json` | **você** | só quando aperta salvar a cópia |
 
 `acervo.json` é o espelho: se você apagar tudo, ele fica vazio em um segundo —
-é a definição de tempo real. `acervo-anterior.json` é o ponto que você
-escolheu, congelado até escolher outro. As imagens que ele cita não são
-apagadas da pasta, mesmo que nenhuma referência de agora aponte pra elas.
+é a definição de tempo real. O histórico é o que você não precisa lembrar de
+fazer: as 30 últimas versões ficam lá, e as imagens que qualquer uma delas cita
+continuam na pasta. `acervo-anterior.json` é o ponto que você escolheu,
+congelado até escolher outro — vale salvar antes de uma faxina grande.
 
-**Salvar a cópia:** Ajustes → *Salvo em disco* → **Salvar cópia agora** no app
-completo; rodapé da barra lateral → *Ponto de retorno* → **Salvar cópia agora**
-na página publicada. Vale fazer antes de qualquer faxina grande.
+**Ver e restaurar:** rodapé da barra lateral → *Onde o acervo é salvo* →
+**Versões guardadas**. Cada versão mostra a data e quantas referências tem, com
+um botão de restaurar. A restauração **soma** ao acervo de agora, não
+substitui: em cada referência fica a versão editada por último, o que você
+criou depois continua aí, e as imagens voltam junto — mesmo que o arquivo tenha
+mudado de nome desde então.
 
-**Restaurar:** o mesmo lugar, botão ao lado. A restauração **soma** ao acervo
-de agora, não substitui: o que você criou depois da cópia continua aí. O
-arquivo também pode ser importado à mão, como qualquer acervo.
-
-A cópia é uma só — salvar outra substitui a anterior. Pra histórico de verdade,
-ponha a pasta dentro do Google Drive, do OneDrive ou do Dropbox: eles guardam
-versões de cada arquivo por 30 dias.
+No app completo existe só a cópia manual, em Ajustes → *Salvo em disco*.
 
 ---
 
 ## Trazendo de volta pelo import
 
-O caminho normal de recuperação é apontar a pasta — é o único que traz as
-imagens junto e volta a salvar dali em diante. Mas o `acervo.json` sozinho
-também entra por **Ajustes → Importar arquivo**, no mesmo botão do backup: os
-dois formatos são aceitos e o app descobre qual é qual.
+O caminho mais completo é **Ajustes → Importar pasta**: escolha a pasta do
+acervo e o `acervo.json` e as imagens entram juntos. Se a pasta tiver mais de
+uma versão — a cópia manual, o histórico — a página pergunta qual importar.
+Funciona em qualquer navegador e não conecta a pasta: ela só é lida. (O
+navegador pode perguntar se você quer "enviar" os arquivos: nada sai do
+computador.)
 
 | O que você tem | O que entra |
 | --- | --- |
-| A pasta inteira | Tudo, imagens inclusive, e o salvamento religa |
-| `acervo.json` sozinho | Links, paletas, notas, boards, tags e anotações |
-| `acervo-anterior.json` | O mesmo, na versão da última cópia que você salvou |
-| `acervo.json` + a pasta conectada | Tudo — as capas são lidas da pasta |
+| A pasta inteira, pelo *Importar pasta* | Tudo, imagens inclusive, e você escolhe a versão |
+| A pasta inteira, conectada em *Escolher a pasta* | Tudo, e o salvamento religa |
+| `acervo.json` sozinho, pelo *Importar arquivo* | Tudo, com as imagens pendentes |
+| Só a pasta `imagens/` (ou os arquivos arrastados) | As imagens pendentes voltam pra referência delas |
 | O backup exportado (`.json`) | Tudo, com as imagens embutidas no arquivo |
 
-Quando alguma capa não vem junto, o aviso diz quantas foram — elas continuam na
-pasta `imagens/`, ao lado do arquivo.
+**Imagem pendente** é a referência que entrou sem o arquivo: o card mostra
+"imagem não encontrada", o painel diz como o arquivo se chamava e oferece
+escolher o arquivo ou a pasta. Arrastar as imagens de `imagens/` pra página
+também resolve: a imagem que já é de uma referência completa aquela referência
+em vez de virar outra — e a que já está no acervo não entra de novo.
