@@ -524,7 +524,7 @@
   /* Prévia do site. Não é screenshot — é uma placa com o domínio real, no tom
      derivado dele. Serve pro card ter capa e pro site ser reconhecido de
      relance, sem depender de rede. */
-  .preview { display: flex; flex-direction: column; gap: 9px; padding: 10px; }
+  .preview { display: flex; flex-direction: column; gap: 9px; padding: 10px; position: relative; }
   .preview-bar { display: flex; align-items: center; gap: 6px; flex: none; }
   .preview-dots { display: flex; gap: 3px; flex: none; }
   .preview-dots i { width: 5px; height: 5px; border-radius: 999px; background: currentColor; opacity: 0.3; }
@@ -545,9 +545,24 @@
     min-height: 0;
   }
   .preview-word {
-    font-size: 24px; font-weight: 600; letter-spacing: -0.035em; line-height: 1;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 24px; font-weight: 600; letter-spacing: -0.035em; line-height: 1.08;
+    max-width: 78%;
+    overflow: hidden; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    position: relative; z-index: 1;
   }
+  .preview-eyebrow {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+    opacity: 0.75; position: relative; z-index: 1;
+  }
+  /* Um rascunho de página, sorteado pelo endereço: dois links do mesmo site
+     não ficam com a mesma capa. */
+  .preview-sketch {
+    position: absolute; right: 12px; bottom: 12px;
+    width: 34%; max-width: 132px; aspect-ratio: 4 / 3;
+    opacity: 0.42; pointer-events: none;
+  }
+  .preview-sketch svg { display: block; width: 100%; height: 100%; }
   .preview-rule { height: 3px; width: 34px; border-radius: 999px; flex: none; }
   .cover-label {
     font-family: var(--mono);
@@ -1339,17 +1354,78 @@
     return luminance > 0.42 ? "#101014" : "#ffffff";
   }
 
-  function paletteTitle(colors) {
-    const name = colorName(colors[0]);
-    return colors.length === 1
-      ? "Cor " + name
-      : `Paleta ${name} · ${colors.length} cores`;
+  /**
+   * O nome que as paletas tinham antes: "Paleta laranja · 3 cores". Duas
+   * paletas laranjas ficavam com o mesmo nome — é por isso que ele saiu.
+   */
+  const OLD_PALETTE_TITLE = /^(paleta (vermelho|laranja|amarelo|verde|turquesa|azul|violeta|rosa|preto|branco|cinza)( escuro| claro)? · \d+ cores|cor (vermelho|laranja|amarelo|verde|turquesa|azul|violeta|rosa|preto|branco|cinza)( escuro| claro)?)$/i;
+
+  /** A primeira palavra puxa pelo tom da primeira cor; a segunda é sorte. */
+  const PALETTE_WORDS = {
+    quente: ["Brasa", "Cobre", "Argila", "Terracota", "Pimenta", "Urucum", "Telha", "Caju", "Fogueira", "Ferrugem"],
+    sol: ["Mel", "Girassol", "Ipê", "Manga", "Açafrão", "Trigo", "Fubá", "Dendê"],
+    verde: ["Musgo", "Mangue", "Folha", "Cerrado", "Samambaia", "Erva", "Jade", "Oliva"],
+    agua: ["Maré", "Lagoa", "Bruma", "Anil", "Restinga", "Garoa", "Orvalho", "Mar"],
+    flor: ["Lavanda", "Orquídea", "Jabuticaba", "Hibisco", "Ameixa", "Açaí", "Buganvília", "Amora"],
+    neutro: ["Linho", "Areia", "Pedra", "Seda", "Concha", "Neblina", "Grafite", "Barro"],
+  };
+  const PALETTE_PLACES = [
+    "de Outono", "de Verão", "de Inverno", "de Março", "de Agosto", "de Domingo",
+    "da Manhã", "da Tarde", "da Serra", "do Quintal", "da Varanda", "da Feira",
+    "do Litoral", "de Olinda", "de Paraty", "do Sertão", "de Lisboa", "do Cais",
+    "da Praia", "do Ateliê",
+  ];
+
+  function paletteFamily(hex) {
+    const { h, s, l } = hexToHsl(hex || "#808080");
+    if (s < 0.12 || l < 0.08 || l > 0.94) return "neutro";
+    if (h < 45 || h >= 335) return "quente";
+    if (h < 70) return "sol";
+    if (h < 160) return "verde";
+    if (h < 250) return "agua";
+    return "flor";
   }
 
-  function colorFromString(value) {
+  /**
+   * Um nome sorteado pra paleta — "Brasa de Outono", "Maré do Cais" — que
+   * nenhuma outra referência do acervo use. Duas paletas laranjas deixam de
+   * se chamar igual.
+   */
+  function paletteTitle(colors, taken = new Set(state.items.map((item) => lower(item.title)))) {
+    const firsts = PALETTE_WORDS[paletteFamily(colors[0])];
+    const pick = (list) => list[Math.floor(Math.random() * list.length)];
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const name = pick(firsts) + " " + pick(PALETTE_PLACES);
+      if (!taken.has(lower(name))) return name;
+    }
+    const base = pick(firsts) + " " + pick(PALETTE_PLACES);
+    let n = 2;
+    while (taken.has(lower(`${base} ${n}`))) n++;
+    return `${base} ${n}`;
+  }
+
+  /** "hsl" com 0–360, 0–100, 0–100 → "#rrggbb", que aceita sufixo de opacidade. */
+  function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const k = (n) => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1));
+    return "#" + [f(0), f(8), f(4)].map((x) => Math.round(x * 255).toString(16).padStart(2, "0")).join("");
+  }
+
+  function hashOf(value) {
     let hash = 0;
     for (let i = 0; i < value.length; i++) hash = (hash * 31 + value.charCodeAt(i)) | 0;
-    return `hsl(${Math.abs(hash) % 360} 42% 46%)`;
+    return Math.abs(hash);
+  }
+
+  /**
+   * Um tom estável pra cada texto, em hex: quem usa soma a opacidade no fim
+   * (`${base}22`). Em hsl() esse sufixo invalidava a cor inteira e o fundo
+   * das capas sumia sem aviso.
+   */
+  function colorFromString(value, shift = 0) {
+    return hslToHex(((hashOf(String(value)) % 360) + shift + 360) % 360, 42, 46);
   }
 
   /* ═════════════════════════ busca fuzzy ══════════════════════════ */
@@ -2780,6 +2856,8 @@
    * - Títulos de máquina — o hash do Pinterest, o "image" de um print — viram
    *   "Imagem sem nome": o título é o nome do arquivo na pasta, e um hash não
    *   diz o que a imagem é.
+   * - Paletas com o nome automático antigo ("Paleta laranja · 3 cores")
+   *   ganham um nome próprio, pra duas paletas laranjas não se chamarem igual.
    */
   async function tidyLibrary() {
     const byId = new Map(state.items.map((item) => [item.id, item]));
@@ -2812,11 +2890,22 @@
       }
     }
 
-    if (!joined && !renamed) return;
+    const taken = new Set(state.items.map((item) => lower(item.title)));
+    let palettes = 0;
+    for (const item of state.items.slice()) {
+      if (item.kind !== "palette" || !OLD_PALETTE_TITLE.test(String(item.title || "").trim())) continue;
+      const title = paletteTitle(item.colors || [], taken);
+      taken.add(lower(title));
+      await updateItem(item.id, { title });
+      palettes++;
+    }
+
+    if (!joined && !renamed && !palettes) return;
     renderRail(); renderHead(); renderGrid();
     const parts = [];
     if (joined) parts.push(contar(joined, "imagem em dobro voltou", "imagens em dobro voltaram") + " para a referência de origem");
     if (renamed) parts.push(contar(renamed, "título de código virou", "títulos de código viraram") + ` “${UNNAMED_IMAGE}”`);
+    if (palettes) parts.push(contar(palettes, "paleta ganhou nome próprio", "paletas ganharam nome próprio"));
     toast("Arrumei o acervo: " + parts.join(" · "), { tone: "success", duration: 9000 });
   }
 
@@ -3325,31 +3414,43 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       box.classList.remove("cover-fallback");
       box.classList.add("preview");
       if (aspect === "auto") box.style.aspectRatio = "16 / 10";
-      box.style.background =
-        `linear-gradient(160deg, ${base}2e, ${base}12 45%, var(--bg-sunken) 100%)`;
 
-      // Nome longo encolhe em vez de truncar: "marketingexamples" tem de
-      // caber inteiro, senão a capa deixa de identificar o site.
-      const word = siteWord(host);
-      const size = word.length > 15 ? 15 : word.length > 11 ? 19 : 24;
+      // O site dá a família de cor; a ordem de chegada entre as páginas do
+      // mesmo site gira o tom (+40°, −40°, +80°…) e troca o rascunho. Irmãs
+      // ficam parentes, nunca iguais — e um link novo não muda os antigos.
+      const page = pagePath(item.url);
+      const rank = siteRank(item, host);
+      const step = Math.ceil(rank / 2) * 40 * (rank % 2 ? 1 : -1);
+      const tone = rank ? colorFromString(host, step) : base;
+      box.style.background =
+        `linear-gradient(160deg, ${tone}38, ${tone}14 45%, var(--bg-sunken) 100%)`;
+
+      // A capa diz qual página é: o título que você deu (ou o fim do
+      // endereço), com o site pequeno em cima. Só a raiz do site leva o
+      // nome do site em destaque.
+      const { headline, eyebrow } = coverHeadline(item, host);
+      const size = headline.length > 28 ? 15 : headline.length > 15 ? 17 : headline.length > 11 ? 20 : 24;
 
       box.append(
-        el("div", { class: "preview-bar", style: `color:${base}` }, [
+        el("div", { class: "preview-bar", style: `color:${tone}` }, [
           el("span", { class: "preview-dots" }, [el("i"), el("i"), el("i")]),
           el("span", {
             class: "preview-url",
-            style: `background:${base}1f;color:${base}`,
-            text: host,
+            style: `background:${tone}1f;color:${tone}`,
+            text: host + (page ? "/" + page : ""),
           }),
         ]),
         el("div", { class: "preview-body" }, [
+          eyebrow ? el("span", { class: "preview-eyebrow", style: `color:${tone}`, text: eyebrow }) : null,
           el("span", {
             class: "preview-word",
-            style: `color:${base};font-size:${size}px`,
-            text: word,
+            style: `color:${tone};font-size:${size}px`,
+            text: headline,
           }),
-          el("span", { class: "preview-rule", style: `background:${base};opacity:.55` }),
+          el("span", { class: "preview-rule", style: `background:${tone};opacity:.55` }),
         ]),
+        el("span", { class: "preview-sketch", style: `color:${tone}`,
+          html: pageSketch(hashOf(host) + rank) }),
       );
       return box;
     }
@@ -3364,15 +3465,69 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     return box;
   }
 
+  /** A posição do link entre os do mesmo site, por ordem de chegada. */
+  function siteRank(item, host) {
+    const siblings = state.items
+      .filter((other) => other.kind === "link" && hostOf(other.url) === host)
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || (a.id < b.id ? -1 : 1));
+    return Math.max(0, siblings.findIndex((other) => other.id === item.id));
+  }
+
+  /** "https://warren.com.br/gestao/fundos/" → "gestao/fundos". */
+  function pagePath(url) {
+    try {
+      const parsed = new URL(url);
+      const path = decodeURIComponent(parsed.pathname).split("/").filter(Boolean).join("/");
+      return path + (parsed.search && !path ? parsed.search : "");
+    } catch { return ""; }
+  }
+
+  /**
+   * O que a capa de um link escreve em destaque. Título que você deu ganha a
+   * capa; título que é só o domínio cede lugar ao fim do endereço; a raiz do
+   * site fica com o nome do site.
+   */
+  function coverHeadline(item, host) {
+    const word = siteWord(host);
+    const title = String(item.title || "").trim();
+    const plain = title.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "");
+    const onlyHost = !title || plain === host || plain === word.toLowerCase();
+    if (!onlyHost) return { headline: title, eyebrow: word };
+    const last = pagePath(item.url).split("/").filter(Boolean).pop();
+    if (last) {
+      const cleaned = last.replace(/\.\w{2,5}$/, "").replace(/[-_]+/g, " ").trim();
+      if (cleaned) return { headline: cleaned.charAt(0).toUpperCase() + cleaned.slice(1), eyebrow: word };
+    }
+    return { headline: word, eyebrow: "" };
+  }
+
+  /** Quatro rascunhos de página; o endereço sorteia qual. */
+  function pageSketch(seed) {
+    const s = 'fill="currentColor"';
+    const variants = [
+      // destaque grande + linhas de texto
+      `<rect x="0" y="0" width="120" height="44" rx="5" ${s} opacity=".55"/><rect x="0" y="54" width="86" height="7" rx="3.5" ${s}/><rect x="0" y="67" width="120" height="5" rx="2.5" ${s} opacity=".6"/><rect x="0" y="78" width="104" height="5" rx="2.5" ${s} opacity=".6"/>`,
+      // grade de cards
+      `<rect x="0" y="0" width="56" height="40" rx="5" ${s} opacity=".55"/><rect x="64" y="0" width="56" height="40" rx="5" ${s} opacity=".35"/><rect x="0" y="48" width="56" height="40" rx="5" ${s} opacity=".35"/><rect x="64" y="48" width="56" height="40" rx="5" ${s} opacity=".55"/>`,
+      // círculo + texto ao lado
+      `<circle cx="26" cy="30" r="26" ${s} opacity=".5"/><rect x="62" y="12" width="58" height="8" rx="4" ${s}/><rect x="62" y="28" width="46" height="5" rx="2.5" ${s} opacity=".6"/><rect x="62" y="39" width="52" height="5" rx="2.5" ${s} opacity=".6"/><rect x="0" y="68" width="120" height="20" rx="5" ${s} opacity=".35"/>`,
+      // colunas
+      `<rect x="0" y="0" width="120" height="10" rx="3" ${s} opacity=".55"/><rect x="0" y="18" width="36" height="70" rx="4" ${s} opacity=".35"/><rect x="42" y="18" width="36" height="70" rx="4" ${s} opacity=".55"/><rect x="84" y="18" width="36" height="70" rx="4" ${s} opacity=".35"/>`,
+    ];
+    return `<svg viewBox="0 0 120 88" aria-hidden="true">${variants[seed % variants.length]}</svg>`;
+  }
+
   /** "www.refactoringui.com" → "refactoringui" — o nome que identifica o site. */
   function siteWord(host) {
     const parts = host.split(".").filter(Boolean);
-    // domínios como "site.com.br" têm o nome na antepenúltima posição
-    const generic = new Set(["com", "co", "net", "org", "gov", "edu", "io", "app", "dev", "br", "website"]);
-    for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts.length < 2) return parts[0] || host;
+    // A última parte é sempre o domínio de topo (.br, .ar, .design…), e as
+    // genéricas logo antes dela também: "site.com.br" e "site.com.ar" dão "site".
+    const generic = new Set(["com", "co", "net", "org", "gov", "edu", "ac"]);
+    for (let i = parts.length - 2; i >= 0; i--) {
       if (!generic.has(parts[i])) return parts[i];
     }
-    return parts[0] || host;
+    return parts[0];
   }
 
   /* ═════════════════════════ render: rail ═════════════════════════ */
@@ -3491,7 +3646,8 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
     const chips = $("kind-chips");
     chips.replaceChildren();
-    Object.entries(KIND_LABEL).forEach(([kind, label]) => {
+    // Notas não têm filtro próprio: a barra fica com links, imagens e paletas.
+    Object.entries(KIND_LABEL).filter(([kind]) => kind !== "note").forEach(([kind, label]) => {
       chips.append(el("button", {
         class: "chip", "aria-pressed": state.kinds.includes(kind) ? "true" : "false", text: label,
         onclick: () => {
@@ -3774,15 +3930,37 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
   function closeDetail() {
     state.detailId = null;
     if (detailClose) { detailClose(); detailClose = null; }
+    detailDom = null;
     renderGrid();
   }
 
   let detailClose = null;
+  /** O painel aberto: { id, panel }. Editar redesenha dentro dele, sem reabrir. */
+  let detailDom = null;
 
   function renderDetail() {
-    if (detailClose) { detailClose(); detailClose = null; }
     const item = state.items.find((i) => i.id === state.detailId);
     if (!item) return;
+
+    // Com o painel já aberto, ele é redesenhado no lugar: sem a animação de
+    // entrada, sem perder a rolagem e sem tirar o cursor do campo em que você
+    // estava. Antes cada edição fechava e reabria o painel inteiro.
+    const reuse = Boolean(detailDom && detailDom.panel.isConnected);
+    let keep = null;
+    if (reuse) {
+      const active = document.activeElement;
+      const oldBody = detailDom.panel.querySelector(".drawer-body");
+      keep = {
+        same: detailDom.id === item.id,
+        scroll: oldBody ? oldBody.scrollTop : 0,
+        field: active && detailDom.panel.contains(active) && active.dataset ? active.dataset.field : null,
+        value: active && "value" in active ? active.value : null,
+        start: active && "selectionStart" in active ? active.selectionStart : null,
+        end: active && "selectionEnd" in active ? active.selectionEnd : null,
+      };
+    } else if (detailClose) {
+      detailClose(); detailClose = null;
+    }
 
     const list = visibleItems();
     const index = list.findIndex((i) => i.id === item.id);
@@ -3826,7 +4004,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
 
     const content = el("div", { class: "drawer-content" });
 
-    const titleField = el("textarea", { class: "drawer-title", rows: "1" });
+    const titleField = el("textarea", { class: "drawer-title", rows: "1", dataset: { field: "title" } });
     titleField.value = item.title;
     const growTitle = () => {
       titleField.style.height = "auto";
@@ -3872,7 +4050,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     }
 
     const notes = el("textarea", {
-      class: "textarea", rows: "3",
+      class: "textarea", rows: "3", dataset: { field: "notes" },
       placeholder: "Por que isso importa? O que você quer reaproveitar daqui?",
     });
     notes.value = item.notes || "";
@@ -3928,7 +4106,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       });
 
       const newColor = el("input", { type: "color", value: "#d97757", "aria-label": "Escolher cor" });
-      const newHex = el("input", { type: "text", placeholder: "#rrggbb ou cole várias de uma vez" });
+      const newHex = el("input", { type: "text", placeholder: "#rrggbb ou cole várias de uma vez", dataset: { field: "new-hex" } });
       const addColors = () => {
         const parsed = parsePalette(newHex.value) || (normalizeHex(newHex.value) ? [normalizeHex(newHex.value)] : null);
         const toAdd = parsed || [normalizeHex(newColor.value)].filter(Boolean);
@@ -3966,7 +4144,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
           html: `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">${ICON.close}</svg>` }),
       ]));
     });
-    const tagInput = el("input", { id: "tag-input", placeholder: "+ tag" });
+    const tagInput = el("input", { id: "tag-input", placeholder: "+ tag", dataset: { field: "tag" } });
     const commitTag = () => {
       const tag = slugifyTag(tagInput.value);
       tagInput.value = "";
@@ -4027,7 +4205,25 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
     body.append(content);
     panel.append(body);
 
-    detailClose = mountOverlay([scrim, panel], () => closeDetail());
+    if (reuse) {
+      const live = detailDom.panel;
+      live.replaceChildren(...panel.childNodes);
+      live.setAttribute("aria-label", item.title);
+      detailDom.id = item.id;
+      if (keep.same) {
+        live.querySelector(".drawer-body").scrollTop = keep.scroll;
+        const field = keep.field && live.querySelector(`[data-field="${keep.field}"]`);
+        if (field) {
+          // O que você já tinha digitado no campo continua lá.
+          if (keep.value !== null && field.value !== keep.value) field.value = keep.value;
+          field.focus({ preventScroll: true });
+          if (keep.start !== null) { try { field.setSelectionRange(keep.start, keep.end); } catch { /* campo sem seleção */ } }
+        }
+      }
+    } else {
+      detailClose = mountOverlay([scrim, panel], () => closeDetail());
+      detailDom = { id: item.id, panel };
+    }
     requestAnimationFrame(growTitle);
   }
 
@@ -4692,8 +4888,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
       if (palette) {
         const saved = await savePalette(palette, targetBoards());
         state.focusedId = saved.id;
-        toast(palette.length === 1 ? "Cor salva" : `Paleta de ${palette.length} cores salva`,
-          { tone: "success" });
+        toast(`${palette.length === 1 ? "Cor" : "Paleta"} “${saved.title}” salva`, { tone: "success" });
       } else if (urls.length) {
         const saved = await saveLinks(urls, targetBoards());
         state.focusedId = saved[0].id;
@@ -5066,8 +5261,7 @@ Referência mental: calculadoras de preço de infra. Menos escolha, mais respost
         const saved = await savePalette(palette, targetBoards());
         state.focusedId = saved.id;
         renderRail(); renderGrid();
-        toast(palette.length === 1 ? "Cor salva" : `Paleta de ${palette.length} cores salva`,
-          { tone: "success" });
+        toast(`${palette.length === 1 ? "Cor" : "Paleta"} “${saved.title}” salva`, { tone: "success" });
         return;
       }
 
